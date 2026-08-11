@@ -126,3 +126,27 @@ def test_settings_auto_run_roundtrip(client):
     items = client.get("/api/settings").json()["items"]
     assert {"key": "auto_run", "value": "0"} in items
     client.put("/api/settings", json={"key": "auto_run", "value": "1"})
+
+def test_auth_required_when_enabled(monkeypatch):
+    """启用认证环境变量后：无凭证 401，错误凭证 401，正确凭证放行。"""
+    import base64
+    from idea_hub import server as server_mod
+    monkeypatch.setenv("IDEAHUB_AUTH_USER", "idea")
+    monkeypatch.setenv("IDEAHUB_AUTH_PASS", "secret")
+    # 重新加载模块级常量
+    import importlib; importlib.reload(server_mod)
+    try:
+        app = server_mod.create_app(str(tmp_path_for_auth()))
+        client = TestClient(app)
+        assert client.get("/").status_code == 401
+        assert client.get("/", headers={"Authorization": "Basic " + base64.b64encode(b"idea:wrong").decode()}).status_code == 401
+        ok = client.get("/", headers={"Authorization": "Basic " + base64.b64encode(b"idea:secret").decode()})
+        assert ok.status_code == 200
+    finally:
+        monkeypatch.delenv("IDEAHUB_AUTH_USER", raising=False)
+        monkeypatch.delenv("IDEAHUB_AUTH_PASS", raising=False)
+        importlib.reload(server_mod)
+
+def tmp_path_for_auth():
+    import tempfile
+    return tempfile.mkdtemp()

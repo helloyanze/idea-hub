@@ -1,9 +1,27 @@
-import json, pathlib
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+import base64, hmac, json, os, pathlib
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from idea_hub import db, models
+
+# ---- Basic Auth（公网部署启用：设置 IDEAHUB_AUTH_USER / IDEAHUB_AUTH_PASS 环境变量） ----
+_AUTH_USER = os.environ.get("IDEAHUB_AUTH_USER", "")
+_AUTH_PASS = os.environ.get("IDEAHUB_AUTH_PASS", "")
+AUTH_ENABLED = bool(_AUTH_USER and _AUTH_PASS)
+
+def _check_auth(request: Request) -> bool:
+    if not AUTH_ENABLED:
+        return True
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Basic "):
+        return False
+    try:
+        raw = base64.b64decode(header[6:]).decode("utf-8")
+        user, _, pwd = raw.partition(":")
+    except Exception:
+        return False
+    return hmac.compare_digest(user, _AUTH_USER) and hmac.compare_digest(pwd, _AUTH_PASS)
 
 class TaskIn(BaseModel):
     title: str
@@ -48,6 +66,13 @@ class SettingIn(BaseModel):
 
 def create_app(db_path: str) -> FastAPI:
     app = FastAPI(title="Idea Hub")
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        if not _check_auth(request):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"},
+                                headers={"WWW-Authenticate": 'Basic realm="Idea Hub"'})
+        return await call_next(request)
     app.state.db_path = db_path
 
     def conn():
