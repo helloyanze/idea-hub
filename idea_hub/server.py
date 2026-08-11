@@ -88,6 +88,25 @@ def create_app(db_path: str) -> FastAPI:
                                      idea_path=body.idea_path, notes=body.notes)
             return models.get_task(c, tid)
 
+    @app.delete("/api/tasks/{task_id}")
+    def delete_task(task_id: int):
+        """删除任务：级联清理关联表与产出文件。"""
+        with conn() as c:
+            t = models.get_task(c, task_id)
+            if not t:
+                raise HTTPException(404, "task not found")
+            c.execute("DELETE FROM task_links WHERE task_id=?", (task_id,))
+            c.execute("DELETE FROM task_tags WHERE task_id=?", (task_id,))
+            c.execute("DELETE FROM execute_requests WHERE task_id=?", (task_id,))
+            c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            c.commit()
+        # 删除产出目录（idea.md / output.md 等）
+        import shutil
+        task_dir = pathlib.Path(t["idea_path"] or "").parent if t.get("idea_path") else None
+        if task_dir and task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        return {"ok": True}
+
     @app.post("/api/tasks/{task_id}/move")
     def move_task(task_id: int, body: MoveIn):
         with conn() as c:

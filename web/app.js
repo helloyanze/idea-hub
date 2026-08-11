@@ -100,6 +100,7 @@ async function openDrawer(id) {
     <div class="actions">
       <button onclick="saveTask(${t.id})">保存修改</button>
       <button onclick="runTask(${t.id})">执行</button>
+      <button onclick="deleteTask(${t.id})" style="background:#dc2626">删除任务</button>
     </div>`;
   $('#idea-full').textContent = t.idea_full || '(无构思文件)';
   // value 赋值写入外部数据（不解析 HTML，与 idea_full 的 textContent 同级别安全）
@@ -124,6 +125,12 @@ async function runTask(id) {
   await api.post(`/api/tasks/${id}/execute`);
   alert('已加入执行队列');
 }
+
+window.deleteTask = async (id) => {
+  if (!confirm(`确定删除任务 #${id}？该操作不可恢复（连同构思与产出文件）`)) return;
+  await api.delete(`/api/tasks/${id}`);
+  closeDrawer(); loadBoard();
+};
 
 async function loadTargets() {
   const data = await api.get('/api/targets');
@@ -192,6 +199,18 @@ window.toggleSource = async (id) => { await api.post(`/api/sources/${id}/toggle`
 window.delSource = async (id) => { await api.delete(`/api/sources/${id}`); loadSources(); };
 window.closeSources = () => $('#source-modal').hidden = true;
 
+async function loadAutoRun() {
+  try {
+    const s = await api.get('/api/settings');
+    const v = (s.items || []).find(x => x.key === 'auto_run');
+    $('#auto-run').checked = v ? v.value !== '0' : true;
+  } catch (e) { $('#auto-run').checked = true; }
+  $('#auto-run').onchange = async () => {
+    await api.put('/api/settings', {key: 'auto_run', value: $('#auto-run').checked ? '1' : '0'});
+    alert($('#auto-run').checked ? '自动运行已开启（每晚任务将执行）' : '自动运行已暂停（每晚任务将跳过）');
+  };
+}
+
 async function init() {
   $('#btn-sources').onclick = loadSources;
   $('#btn-types').onclick = loadTagsModal;
@@ -199,6 +218,7 @@ async function init() {
   initSortable();
   await loadTargets();
   await loadTags();
+  await loadAutoRun();
   await loadBoard();
 }
 init();

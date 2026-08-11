@@ -101,3 +101,28 @@ def test_delete_source_clears_task_hot_item_ref(client):
     task = conn.execute("SELECT id, hot_item_id FROM tasks WHERE id=?", (tid,)).fetchone()
     assert task is not None and task["hot_item_id"] is None
     conn.close()
+
+def test_delete_task_cascades(client):
+    """删除任务：任务行 + 关联表清理，404 对不存在 id。"""
+    # 准备：目标 + 热点 + 任务 + 标签 + 执行请求
+    import json as _json
+    client.post("/api/targets", json={"name": "t", "description": "d",
+                                      "score_dimensions": "{}"})
+    client.post("/api/targets/1/activate")
+    r = client.post("/api/tasks", json={"title": "待删任务", "idea_summary": "s",
+                                        "target_id": 1, "feasibility_score": 7,
+                                        "score_breakdown": "{}", "idea_path": "",
+                                        "notes": ""})
+    tid = r.json()["id"]
+    client.post(f"/api/tasks/{tid}/tags", json={"name": "AI"})
+    client.post(f"/api/tasks/{tid}/execute")
+    r = client.delete(f"/api/tasks/{tid}")
+    assert r.status_code == 200
+    assert client.get(f"/api/tasks/{tid}").status_code == 404
+    assert client.delete("/api/tasks/9999").status_code == 404
+
+def test_settings_auto_run_roundtrip(client):
+    client.put("/api/settings", json={"key": "auto_run", "value": "0"})
+    items = client.get("/api/settings").json()["items"]
+    assert {"key": "auto_run", "value": "0"} in items
+    client.put("/api/settings", json={"key": "auto_run", "value": "1"})
