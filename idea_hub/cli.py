@@ -109,6 +109,12 @@ def cmd_import_ideas(args):
             results.append({"error": str(exc)})
     print(json.dumps(results, ensure_ascii=False, indent=1))
 
+def cmd_tags(args):
+    """列出标签（供 AI 生成时选择）。"""
+    conn = _conn(args)
+    for t in models.list_tags(conn, active_only=getattr(args, "active", False)):
+        print(json.dumps(dict(t), ensure_ascii=False))
+
 def cmd_add_idea(args):
     conn = _conn(args)
     content = pathlib.Path(args.detail_path).read_text(encoding="utf-8")
@@ -252,6 +258,9 @@ def main():
     pi = sub.add_parser("import-ideas")
     pi.add_argument("--file", required=True, help="idea JSON 文件路径（数组）")
     pi.set_defaults(func=cmd_import_ideas)
+    pt = sub.add_parser("tags")
+    pt.add_argument("--active", action="store_true", help="仅列出启用中的标签")
+    pt.set_defaults(func=cmd_tags)
     pr = sub.add_parser("relate")
     pr.add_argument("--task-id", type=int, required=True)
     pr.add_argument("--hot-item-id", type=int, required=True)
