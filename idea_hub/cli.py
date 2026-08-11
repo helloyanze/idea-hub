@@ -91,6 +91,10 @@ def cmd_next(args):
 
 def cmd_complete(args):
     conn = _conn(args)
+    task = models.get_task(conn, args.task_id)
+    if task is None:
+        print(f"error: task {args.task_id} not found", file=sys.stderr)
+        sys.exit(1)
     content = pathlib.Path(args.output_path).read_text(encoding="utf-8")
     d = pathlib.Path(args.base) / "outputs" / "tasks" / str(args.task_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -107,6 +111,9 @@ def cmd_complete(args):
 def cmd_fail(args):
     conn = _conn(args)
     task = models.get_task(conn, args.task_id)
+    if task is None:
+        print(f"error: task {args.task_id} not found", file=sys.stderr)
+        sys.exit(1)
     models.update_task(conn, args.task_id, notes=f"{task['notes']}\n[失败] {args.reason}".strip())
     models.move_task(conn, args.task_id, "waiting")
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",

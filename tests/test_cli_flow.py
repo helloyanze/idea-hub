@@ -109,3 +109,20 @@ def test_fail_returns_to_waiting(tmp_path):
     t = models.get_task(conn, 1)
     assert t["status"] == "waiting" and "超时" in t["notes"]
     conn.close()
+
+def test_complete_missing_task_fails_cleanly(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn); conn.close()
+    out = tmp_path / "out.md"; out.write_text("# 产出\n正文", encoding="utf-8")
+    r = _run_cli(["complete", "--task-id", "999", "--summary", "完成摘要",
+                  "--output-path", str(out)], tmp_path)
+    assert r.returncode != 0
+    assert "999" in r.stderr
+    # no orphan output file / directory for the missing task
+    assert not pathlib.Path("outputs/tasks/999/output.md").exists()
+    assert not pathlib.Path("outputs/tasks/999").exists()
+
+def test_fail_missing_task_fails_cleanly(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn); conn.close()
+    r = _run_cli(["fail", "--task-id", "999", "--reason", "超时"], tmp_path)
+    assert r.returncode != 0
+    assert "999" in r.stderr
