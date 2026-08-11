@@ -1,0 +1,17 @@
+# Idea Hub 云端 crontab（安装：crontab crontab.txt 或追加到现有 crontab）
+# 每晚 02:00 收集热点并生成 idea（Hermes AI 任务）
+# 每晚 03:00 执行等待队列（Hermes AI 任务）
+#
+# 注意：
+# - 调整 hermes 可执行文件路径（which hermes）
+# - 每晚运行时间可按需修改
+# - 执行 cron 每 15 分钟跑一次更及时，但会消耗 LLM 调用；默认每晚一次
+
+# 收集 + 生成 idea（每晚 02:00）
+0 2 * * * cd $HOME/idea-hub && uv run python -m idea_hub.cli --db data/idea.db collect >> logs/collect.log 2>&1 && hermes chat -q "$(cat $HOME/idea-hub/prompts/generate.txt)" >> logs/generate.log 2>&1
+
+# 执行等待队列（每晚 03:00）
+0 3 * * * cd $HOME/idea-hub && hermes chat -q "$(cat $HOME/idea-hub/prompts/execute.txt)" >> logs/execute.log 2>&1
+
+# 备份数据库（每晚 03:30，保留最近 7 份由 backup_db 逻辑处理）
+30 3 * * * cd $HOME/idea-hub && uv run python -c "from idea_hub import db; c=db.connect('data/idea.db'); db.backup_db(c,'backups'); c.close()" >> logs/backup.log 2>&1
