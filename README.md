@@ -42,7 +42,7 @@ bash scripts/start.sh
 - **手动触发**：前端把卡片拖到「等待」列（`POST /api/tasks/{id}/move`，`to_status=waiting`），再点卡片上的「执行」按钮（`POST /api/tasks/{id}/execute`）把任务 id 写入 `execute_requests`（status=pending）。
 - **执行 cron（每 15 分钟）**：
   1. `uv run python -m idea_hub.cli pending-executions` 列出 pending 的 task id；
-  2. 对每个 pending id 执行 `uv run python -m idea_hub.cli next` —— 原子领取队首（最早 `waiting`）任务置为 `in_progress` 并输出任务 JSON（含 idea_path/notes）；若输出 `queue empty` 或退出码非 0，跳过本轮；
+  2. 对每个 pending id 执行 `uv run python -m idea_hub.cli next --task-id <id>` —— 定向领取该任务（任务须处于 `waiting`，否则退出码非 0），输出任务 JSON（含 idea_path/notes）；若命令失败（退出码非 0，如任务已不在 waiting），运行 `uv run python -m idea_hub.cli resolve-execution --task-id <id>` 清掉该 pending 请求并跳过该任务；
   3. 以创作者身份执行任务：阅读 `idea_path` 指向的 idea.md 构思与 notes，产出正文；
   4. `complete --task-id <id> --summary <摘要> --output-path <产出文件>` 把正文写入 `outputs/tasks/<id>/output.md` 并将任务置为「已完成」；若无法完成，`fail --task-id <id> --reason <原因>` 会把原因追加进 notes 并把任务退回「等待」；
   5. `complete`/`fail` 会自动把该任务的 pending execute_request 置为 done，不会重复执行。
@@ -113,7 +113,7 @@ hermes cron create --name idea-hub-collect --deliver local --workdir D:/Programs
 
 1. 运行 `uv run python -m idea_hub.cli pending-executions`，得到待执行的 task id 列表（每行一个）。
 2. 对每个待执行任务：
-   a. 运行 `uv run python -m idea_hub.cli next` 领取队首（最早的 waiting）任务，输出任务 JSON（含 id/title/idea_path/notes）。若输出 `queue empty` 或退出码非 0，跳过本轮；
+   a. 运行 `uv run python -m idea_hub.cli next --task-id <id>` 定向领取该任务（任务须处于 waiting，否则退出码非 0），输出任务 JSON（含 id/title/idea_path/notes）；若命令失败（退出码非 0，如任务不在 waiting），运行 `uv run python -m idea_hub.cli resolve-execution --task-id <id>` 清掉该 pending 请求并跳过该任务；
    b. 以创作者身份执行任务：阅读 idea_path 指向的 idea.md（构思全文）与 notes，产出正文；
    c. 把产出写入临时文件（如 .cron-outputs/<task_id>.md）；
    d. 运行 `uv run python -m idea_hub.cli complete --task-id <id> --summary <一句话完成摘要> --output-path <产出文件路径>`；若因信息不足等原因无法完成，运行 `uv run python -m idea_hub.cli fail --task-id <id> --reason <原因>`（任务退回「等待」）。

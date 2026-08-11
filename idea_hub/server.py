@@ -81,7 +81,10 @@ def create_app(db_path: str) -> FastAPI:
     def move_task(task_id: int, body: MoveIn):
         with conn() as c:
             if not models.get_task(c, task_id): raise HTTPException(404, "task not found")
-            models.move_task(c, task_id, body.to_status)
+            try:
+                models.move_task(c, task_id, body.to_status)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
             return models.get_task(c, task_id)
 
     @app.patch("/api/tasks/{task_id}")
@@ -114,6 +117,8 @@ def create_app(db_path: str) -> FastAPI:
     @app.post("/api/targets/{target_id}/activate")
     def activate_target(target_id: int):
         with conn() as c:
+            t = next((t for t in models.list_targets(c) if t["id"] == target_id), None)
+            if not t: raise HTTPException(404, "target not found")
             models.activate_target(c, target_id)
             return {"ok": True}
 
@@ -139,7 +144,14 @@ def create_app(db_path: str) -> FastAPI:
     @app.delete("/api/sources/{source_id}")
     def delete_source(source_id: int):
         with conn() as c:
-            c.execute("DELETE FROM sources WHERE id=?", (source_id,)); c.commit()
+            src = next((s for s in models.list_sources(c) if s["id"] == source_id), None)
+            if not src: raise HTTPException(404, "source not found")
+            # 级联删除（FK 启用后按依赖顺序）：task_links → hot_items → sources，单事务
+            c.execute("DELETE FROM task_links WHERE hot_item_id IN "
+                      "(SELECT id FROM hot_items WHERE source_id=?)", (source_id,))
+            c.execute("DELETE FROM hot_items WHERE source_id=?", (source_id,))
+            c.execute("DELETE FROM sources WHERE id=?", (source_id,))
+            c.commit()
             return {"ok": True}
 
     @app.get("/api/settings")

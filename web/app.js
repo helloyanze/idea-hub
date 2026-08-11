@@ -9,6 +9,13 @@ let currentTarget = null;
 
 const COLUMN_NAMES = {archived:'留档', todo:'待办', waiting:'等待', in_progress:'进行中', done:'已完成'};
 
+// 转义外部数据后再插入 innerHTML，防止 XSS（& < > " '）
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
+
 function badge(score) {
   const cls = score < 6 ? 'red' : score <= 7 ? 'yellow' : 'green';
   return `<span class="badge ${cls}">${score}</span>`;
@@ -16,8 +23,8 @@ function badge(score) {
 
 function cardHTML(t) {
   return `<div class="card" data-id="${t.id}">
-    <div class="card-title">${t.title}</div>
-    <div class="card-meta">${badge(t.feasibility_score)} ${(t.idea_summary||'').slice(0,60)}</div>
+    <div class="card-title">${escapeHtml(t.title)}</div>
+    <div class="card-meta">${badge(t.feasibility_score)} ${escapeHtml((t.idea_summary||'').slice(0,60))}</div>
   </div>`;
 }
 
@@ -65,8 +72,8 @@ async function openDrawer(id) {
     <label>构思摘要 <textarea id="f-summary"></textarea></label>
     <label>分数 <input type="range" min="1" max="10" id="f-score" value="${t.feasibility_score}"></label>
     <h3>构思全文</h3><div id="idea-full"></div>
-    <h3>评分明细</h3><pre>${prettyBreakdown(t.score_breakdown)}</pre>
-    <h3>产出</h3><div>${t.output_path ? `<a href="/outputs/${t.output_path.replace(/^outputs\//,'')}">打开产出</a>` : '无'}</div>
+    <h3>评分明细</h3><pre>${escapeHtml(prettyBreakdown(t.score_breakdown))}</pre>
+    <h3>产出</h3><div>${t.output_path ? `<a href="/outputs/${escapeHtml(t.output_path.replace(/^outputs\//,''))}">打开产出</a>` : '无'}</div>
     ${hotItem}
     <label>备注 <textarea id="f-notes"></textarea></label>
     <div class="actions">
@@ -100,7 +107,7 @@ async function runTask(id) {
 async function loadTargets() {
   const data = await api.get('/api/targets');
   const sel = $('#target-switch');
-  sel.innerHTML = data.items.map(t => `<option value="${t.id}" ${t.is_active?'selected':''}>${t.name}</option>`).join('');
+  sel.innerHTML = data.items.map(t => `<option value="${t.id}" ${t.is_active?'selected':''}>${escapeHtml(t.name)}</option>`).join('');
   currentTarget = data.items.find(t => t.is_active)?.id ?? null;
   sel.onchange = async () => {
     await api.post(`/api/targets/${sel.value}/activate`);
@@ -119,7 +126,7 @@ async function loadSources() {
       <input id="src-url" placeholder="URL">
       <button onclick="addSource()">添加</button>
     </div>` +
-    d.items.map(s => `<div class="src-row">${s.name} (${s.type}) ${s.enabled?'启用':'停用'}
+    d.items.map(s => `<div class="src-row">${escapeHtml(s.name)} (${escapeHtml(s.type)}) ${s.enabled?'启用':'停用'}
       <span><button onclick="toggleSource(${s.id})">切换</button>
       <button onclick="delSource(${s.id})">删除</button></span></div>`).join('') +
     `<button onclick="closeSources()">关闭</button></div>`;

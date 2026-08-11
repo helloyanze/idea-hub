@@ -81,6 +81,22 @@ def cmd_relate(args):
 
 def cmd_next(args):
     conn = _conn(args)
+    if getattr(args, "task_id", None) is not None:
+        # 定向领取：只领取指定 waiting 任务，校验失败时不领取任何任务
+        task = models.get_task(conn, args.task_id)
+        if task is None:
+            print(f"error: task {args.task_id} not found", file=sys.stderr)
+            sys.exit(1)
+        if task["status"] != "waiting":
+            print(f"error: task {args.task_id} status is {task['status']}, expected waiting",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not models.try_start_task(conn, args.task_id):
+            print(f"error: task {args.task_id} could not be claimed", file=sys.stderr)
+            sys.exit(1)
+        task = models.get_task(conn, args.task_id)
+        print(json.dumps(task, ensure_ascii=False))
+        return
     row = conn.execute("SELECT id FROM tasks WHERE status='waiting' ORDER BY updated_at LIMIT 1").fetchone()
     if not row:
         print("queue empty"); sys.exit(1)
@@ -156,7 +172,10 @@ def main():
     pr.add_argument("--dims", required=True)
     pr.add_argument("--detail-path", required=True)
     pr.set_defaults(func=cmd_relate)
-    sub.add_parser("next").set_defaults(func=cmd_next)
+    pn = sub.add_parser("next")
+    pn.add_argument("--task-id", type=int, default=None,
+                    help="定向领取指定 waiting 任务（默认领取队首最早 waiting 任务）")
+    pn.set_defaults(func=cmd_next)
     pc = sub.add_parser("complete")
     pc.add_argument("--task-id", type=int, required=True)
     pc.add_argument("--summary", required=True)

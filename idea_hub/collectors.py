@@ -30,7 +30,9 @@ def fetch_hotlist(url, items_path="data", session=None):
     return out
 
 def fetch_rss(url):
-    feed = feedparser.parse(url)
+    # requests.get(timeout=15)：底层 urllib 无超时，死 feed 会无限挂起
+    resp = requests.get(url, timeout=15)
+    feed = feedparser.parse(resp.content)
     if feed.bozo:
         raise RuntimeError(f"feed parse failed: {feed.get('bozo_exception')}")
     out = []

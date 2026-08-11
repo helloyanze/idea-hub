@@ -111,3 +111,10 @@ def test_settings(conn):
     assert models.get_setting(conn, "threshold") is None
     models.set_setting(conn, "threshold", "6")
     assert models.get_setting(conn, "threshold") == "6"
+
+# ---- S3: PRAGMA foreign_keys=ON（connect() 已启用） ----
+
+def test_foreign_keys_enforced(conn):
+    """hot_items.source_id 引用不存在的 sources.id 必须抛 IntegrityError（回归：FK 未启用时静默插入）。"""
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (999, 'x', 'http://x')")

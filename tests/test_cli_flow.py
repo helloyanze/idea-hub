@@ -126,3 +126,43 @@ def test_fail_missing_task_fails_cleanly(tmp_path):
     r = _run_cli(["fail", "--task-id", "999", "--reason", "超时"], tmp_path)
     assert r.returncode != 0
     assert "999" in r.stderr
+
+# ---- B1: next --task-id 定向领取（execute cron 按 pending id 领取，不得误领队首） ----
+
+def test_next_task_id_claims_specified_not_head(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    models.create_task(conn, title="早期任务", idea_summary="s", target_id=1, hot_item_id=1,
+                       feasibility_score=7, score_breakdown="{}", idea_path="")
+    models.create_task(conn, title="目标任务", idea_summary="s", target_id=1, hot_item_id=1,
+                       feasibility_score=7, score_breakdown="{}", idea_path="")
+    models.move_task(conn, 1, "waiting")  # 更早 waiting，队首
+    models.move_task(conn, 2, "waiting")  # 指定领取的目标
+    conn.close()
+    r = _run_cli(["next", "--task-id", "2"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    assert models.get_task(conn, 2)["status"] == "in_progress"  # 指定任务被领取
+    assert models.get_task(conn, 1)["status"] == "waiting"      # 队首未被误领
+    conn.close()
+
+def test_next_task_id_rejects_non_waiting(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    models.create_task(conn, title="待办任务", idea_summary="s", target_id=1, hot_item_id=1,
+                       feasibility_score=7, score_breakdown="{}", idea_path="")  # status=todo
+    models.create_task(conn, title="等待任务", idea_summary="s", target_id=1, hot_item_id=1,
+                       feasibility_score=7, score_breakdown="{}", idea_path="")
+    models.move_task(conn, 2, "waiting")
+    conn.close()
+    r = _run_cli(["next", "--task-id", "1"], tmp_path)
+    assert r.returncode == 1
+    assert "1" in r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    assert models.get_task(conn, 1)["status"] == "todo"     # 状态不变
+    assert models.get_task(conn, 2)["status"] == "waiting"  # 未领取任何任务
+    conn.close()
+
+def test_next_task_id_missing_task(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn); conn.close()
+    r = _run_cli(["next", "--task-id", "999"], tmp_path)
+    assert r.returncode == 1
+    assert "999" in r.stderr
