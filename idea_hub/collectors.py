@@ -99,13 +99,26 @@ def fetch_hackernews(limit=30, session=None):
             continue
     return out
 
-def _upsert_hot_item(conn, source_id, item):
-    cur = conn.execute("INSERT OR IGNORE INTO hot_items (source_id, title, url, content_snapshot) "
-                       "VALUES (?,?,?,?)", (source_id, item["title"], item["url"], item["content_snapshot"]))
+def _upsert_hot_item(conn, source_id, item, score=None):
+    score = score or {}
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO hot_items (source_id, title, url, content_snapshot, "
+        "source_score, fact_score, verify_score, time_score, final_score, review_status) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (source_id, item["title"], item["url"], item["content_snapshot"],
+         score.get("source_score", 0), score.get("fact_score", 0),
+         score.get("verify_score", 60), score.get("time_score", 100),
+         score.get("final_score", 0), score.get("review_status", "collected")))
     return cur.rowcount
 
-def collect_all(conn):
-    collected, errors = 0, []
+def collect_all(conn, use_scoring=True):
+    """收集全部分发：按来源类型抓取 → 关键词过滤 → 评分分流（收录/复核/丢弃）入库。
+
+    use_scoring=False 时跳过 LLM 评分（测试与降级路径）。
+    """
+    from . import scorer as _scorer
+    collected, discarded, review, errors = 0, 0, 0, []
+    pending = []  # (src, item)
     for src in models.list_sources(conn, enabled_only=True):
         try:
             if src["type"] == "rss":
@@ -119,9 +132,32 @@ def collect_all(conn):
                     src["url"], items_path=src.get("items_path", "data"),
                     title_field=src.get("title_field", "title"))
             items = [it for it in items if _matches_keywords(it, src.get("keywords", ""))]
-            for it in items:
-                collected += _upsert_hot_item(conn, src["id"], it)
-            conn.commit()
+            pending.extend((src, it) for it in items)
         except Exception as exc:
             errors.append(f"{src['name']}: {exc}")
-    return {"collected": collected, "errors": errors}
+    if use_scoring and pending:
+        try:
+            scores = _scorer.score_batch([
+                {"id": i, "title": it["title"], "url": it["url"],
+                 "content_snapshot": it["content_snapshot"], "collected_at": None}
+                for i, (_, it) in enumerate(pending)])
+            for i, (src, it) in enumerate(pending):
+                sc = scores.get(i, {})
+                if sc.get("review_status") == "discarded":
+                    discarded += 1
+                    continue
+                if sc.get("review_status") == "review":
+                    review += 1
+                collected += _upsert_hot_item(conn, src["id"], it, sc)
+            conn.commit()
+        except Exception as exc:
+            errors.append(f"scoring: {exc}")
+            # LLM 评分失败降级：全部按无评分入库，不阻塞收集
+            for src, it in pending:
+                collected += _upsert_hot_item(conn, src["id"], it)
+            conn.commit()
+    else:
+        for src, it in pending:
+            collected += _upsert_hot_item(conn, src["id"], it)
+        conn.commit()
+    return {"collected": collected, "discarded": discarded, "review": review, "errors": errors}

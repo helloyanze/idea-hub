@@ -24,7 +24,7 @@ def test_full_pipeline(tmp_path):
     def cli(*args):
         return subprocess.run([sys.executable, "-m", "idea_hub.cli", "--db", db_path, "--base", str(base), *args],
                               capture_output=True, text=True, cwd=pathlib.Path(__file__).parent.parent)
-    r = cli("collect"); assert r.returncode == 0, r.stderr
+    r = cli("collect", "--no-score"); assert r.returncode == 0, r.stderr
     assert "collected=1" in r.stdout
     cand = cli("candidates")
     assert "热点1" in cand.stdout

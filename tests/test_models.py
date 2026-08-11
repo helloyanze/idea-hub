@@ -4,19 +4,22 @@ from idea_hub import db, models
 
 def test_create_and_get_task(conn, target_id):
     tid = models.create_task(conn, title="热点A文章", idea_summary="摘要",
-                             target_id=target_id, feasibility_score=7,
+                             target_id=target_id, feasibility_score=8,
                              score_breakdown='{"热度":8,"相关性":7,"可执行性":6}',
                              idea_path="outputs/tasks/1/idea.md")
     task = models.get_task(conn, tid)
     assert task["title"] == "热点A文章"
-    assert task["status"] == "todo"  # score 7 >= 6
-    assert task["feasibility_score"] == 7
+    assert task["status"] == "todo"  # score 8 >= 8
+    assert task["feasibility_score"] == 8
 
 def test_low_score_task_archived(conn, target_id):
     tid = models.create_task(conn, title="低分", idea_summary="s",
-                             target_id=target_id, feasibility_score=4,
+                             target_id=target_id, feasibility_score=6,
                              score_breakdown="{}", idea_path="x")
-    assert models.get_task(conn, tid)["status"] == "archived"
+    assert models.get_task(conn, tid)["status"] == "archived"  # 6-7 归档
+    assert models.create_task(conn, title="舍弃", idea_summary="s",
+                              target_id=target_id, feasibility_score=5,
+                              score_breakdown="{}", idea_path="x") is None  # <6 舍弃
 
 def test_try_start_task_atomic(conn, target_id):
     tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
@@ -28,9 +31,9 @@ def test_try_start_task_atomic(conn, target_id):
 
 def test_stats_counts(conn, target_id):
     models.create_task(conn, title="a", idea_summary="s", target_id=target_id,
-                       feasibility_score=7, score_breakdown="{}", idea_path="x")
+                       feasibility_score=8, score_breakdown="{}", idea_path="x")
     models.create_task(conn, title="b", idea_summary="s", target_id=target_id,
-                       feasibility_score=4, score_breakdown="{}", idea_path="x")
+                       feasibility_score=6, score_breakdown="{}", idea_path="x")
     st = models.stats(conn)
     assert st["todo"] == 1 and st["archived"] == 1
 
@@ -39,7 +42,7 @@ def test_stats_counts(conn, target_id):
 def test_backup_db_includes_recent_commits(conn, target_id, tmp_path):
     """WAL 模式下备份必须包含未 checkpoint 的最近提交（回归：shutil.copy2 会静默丢失）。"""
     tid = models.create_task(conn, title="备份完整性", idea_summary="s", target_id=target_id,
-                             feasibility_score=7, score_breakdown="{}", idea_path="x")
+                             feasibility_score=8, score_breakdown="{}", idea_path="x")
     dest = db.backup_db(conn, str(tmp_path / "backups"))
     assert pathlib.Path(dest).exists()
     bconn = sqlite3.connect(dest)
@@ -66,7 +69,7 @@ def test_backup_db_prunes_to_seven(conn, target_id, tmp_path):
 def test_update_task_rejects_invalid_status(conn, target_id):
     """status 不属于 update_task 可写字段——无论合法/非法值都必须抛 KeyError（状态变更只能走 move_task）。"""
     tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
-                             feasibility_score=7, score_breakdown="{}", idea_path="x")
+                             feasibility_score=8, score_breakdown="{}", idea_path="x")
     with pytest.raises(KeyError):
         models.update_task(conn, tid, status="done!!")
     with pytest.raises(KeyError):
@@ -79,7 +82,7 @@ def test_update_task_rejects_invalid_status(conn, target_id):
 def test_update_task_normal_fields_unaffected(conn, target_id):
     """非 status 字段（notes/title/feasibility_score）更新正常；status 字段被拒绝，只能走 move_task。"""
     tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
-                             feasibility_score=7, score_breakdown="{}", idea_path="x")
+                             feasibility_score=8, score_breakdown="{}", idea_path="x")
     models.update_task(conn, tid, notes="reviewed", title="新标题", feasibility_score=8)
     task = models.get_task(conn, tid)
     assert task["notes"] == "reviewed" and task["title"] == "新标题"

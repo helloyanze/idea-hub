@@ -16,7 +16,7 @@ def test_add_idea_threshold_and_draft(tmp_path):
     conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn); conn.close()
     draft = tmp_path / "draft.md"; draft.write_text("# 构思全文\n内容", encoding="utf-8")
     r = _run_cli(["add-idea", "--hot-item-id", "1", "--title", "写一篇X文章",
-                  "--summary", "摘要", "--score", "7", "--dims", '{"热度":8}',
+                  "--summary", "摘要", "--score", "8", "--dims", '{"热度":8}',
                   "--detail-path", str(draft)], tmp_path)
     assert r.returncode == 0, r.stderr
     conn = db.connect(str(tmp_path / "t.db"))
@@ -28,18 +28,18 @@ def test_add_idea_threshold_and_draft(tmp_path):
 def test_relate_rescores_archived_to_todo(tmp_path):
     conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
     models.create_task(conn, title="旧想法", idea_summary="s", target_id=1,
-                       hot_item_id=1, feasibility_score=5, score_breakdown="{}",
-                       idea_path="outputs/tasks/1/idea.md")  # archived
+                       hot_item_id=1, feasibility_score=6, score_breakdown="{}",
+                       idea_path="outputs/tasks/1/idea.md")  # 6-7 归档
     conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点Y', 'http://y')")
     conn.commit(); conn.close()
     draft = tmp_path / "draft2.md"; draft.write_text("补充信息", encoding="utf-8")
     r = _run_cli(["relate", "--task-id", "1", "--hot-item-id", "2",
-                  "--score", "7", "--dims", '{"热度":9}', "--detail-path", str(draft)], tmp_path)
+                  "--score", "8", "--dims", '{"热度":9}', "--detail-path", str(draft)], tmp_path)
     assert r.returncode == 0, r.stderr
     conn = db.connect(str(tmp_path / "t.db"))
     task = models.get_task(conn, 1)
     assert task["status"] == "todo"
-    assert task["feasibility_score"] == 7
+    assert task["feasibility_score"] == 8
     links = conn.execute("SELECT hot_item_id FROM task_links WHERE task_id=1").fetchall()
     assert {l["hot_item_id"] for l in links} == {1, 2}
     conn.close()
@@ -60,8 +60,8 @@ def test_relate_missing_task_fails_without_side_effects(tmp_path):
 def test_relate_missing_detail_file_leaves_no_orphan_link(tmp_path):
     conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
     models.create_task(conn, title="旧想法", idea_summary="s", target_id=1,
-                       hot_item_id=1, feasibility_score=5, score_breakdown="{}",
-                       idea_path="outputs/tasks/1/idea.md")  # archived
+                       hot_item_id=1, feasibility_score=6, score_breakdown="{}",
+                       idea_path="outputs/tasks/1/idea.md")  # 6-7 归档
     conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点Y', 'http://y')")
     conn.commit(); conn.close()
     r = _run_cli(["relate", "--task-id", "1", "--hot-item-id", "2",
@@ -72,7 +72,7 @@ def test_relate_missing_detail_file_leaves_no_orphan_link(tmp_path):
     links = conn.execute("SELECT hot_item_id FROM task_links WHERE task_id=1").fetchall()
     assert {l["hot_item_id"] for l in links} == {1}  # no orphan link to hot item 2
     task = models.get_task(conn, 1)
-    assert task["feasibility_score"] == 5  # score untouched
+    assert task["feasibility_score"] == 6  # score untouched
     assert task["status"] == "archived"  # status untouched
     conn.close()
 
@@ -148,9 +148,9 @@ def test_next_task_id_claims_specified_not_head(tmp_path):
 def test_next_task_id_rejects_non_waiting(tmp_path):
     conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
     models.create_task(conn, title="待办任务", idea_summary="s", target_id=1, hot_item_id=1,
-                       feasibility_score=7, score_breakdown="{}", idea_path="")  # status=todo
+                       feasibility_score=8, score_breakdown="{}", idea_path="")  # status=todo
     models.create_task(conn, title="等待任务", idea_summary="s", target_id=1, hot_item_id=1,
-                       feasibility_score=7, score_breakdown="{}", idea_path="")
+                       feasibility_score=8, score_breakdown="{}", idea_path="")
     models.move_task(conn, 2, "waiting")
     conn.close()
     r = _run_cli(["next", "--task-id", "1"], tmp_path)
@@ -173,12 +173,12 @@ def test_add_idea_todo_quota(tmp_path):
     models.set_setting(conn, "todo_limit", "3")
     for i in range(3):
         models.create_task(conn, title=f"任务{i}", idea_summary="s", target_id=1,
-                           feasibility_score=7, score_breakdown="{}", idea_path="")
+                           feasibility_score=8, score_breakdown="{}", idea_path="")
     conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点Q', 'http://q')")
     conn.commit(); conn.close()
     draft = tmp_path / "d3.md"; draft.write_text("构思", encoding="utf-8")
     r = _run_cli(["add-idea", "--hot-item-id", "2", "--title", "超额任务",
-                  "--summary", "s", "--score", "7", "--dims", "{}",
+                  "--summary", "s", "--score", "8", "--dims", "{}",
                   "--detail-path", str(draft)], tmp_path)
     assert r.returncode == 0, r.stderr
     conn = db.connect(str(tmp_path / "t.db"))
@@ -210,15 +210,15 @@ def test_import_ideas_batch(tmp_path):
     tag1 = models.create_tag(conn, name="ai")
     models.set_setting(conn, "todo_limit", "2")
     t1 = models.create_task(conn, title="已有任务", idea_summary="s", target_id=1,
-                            feasibility_score=5, score_breakdown="{}", idea_path="")
+                            feasibility_score=6, score_breakdown="{}", idea_path="")
     conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点A', 'http://a')")
     conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点B', 'http://b')")
     conn.commit(); conn.close()
     ideas = [
-        {"hot_item_id": 2, "title": "新idea", "summary": "新", "score": 7,
+        {"hot_item_id": 2, "title": "新idea", "summary": "新", "score": 8,
          "dims": "{}", "tags": str(tag1),
          "detail": "构思全文内容\n第二行"},
-        {"hot_item_id": 3, "related_task_id": t1, "score": 7, "dims": "{}",
+        {"hot_item_id": 3, "related_task_id": t1, "score": 8, "dims": "{}",
          "detail": "新角度"},
     ]
     f = tmp_path / "ideas.json"; f.write_text(json.dumps(ideas, ensure_ascii=False), encoding="utf-8")
@@ -228,12 +228,12 @@ def test_import_ideas_batch(tmp_path):
     assert len(out) == 2
     new_task = out[0]
     assert new_task["relate"] is False and new_task["status"] == "todo"
-    # 关联更新：已有任务分数 5→7 且 archived→todo（配额 2 允许）
+    # 关联更新：已有任务分数 6→8 且 archived→todo（配额 2 允许）
     relate_task = out[1]
     assert relate_task["relate"] is True and relate_task["status"] == "todo"
     conn = db.connect(str(tmp_path / "t.db"))
     t2 = models.get_task(conn, t1)
-    assert t2["feasibility_score"] == 7 and t2["status"] == "todo"
+    assert t2["feasibility_score"] == 8 and t2["status"] == "todo"
     tags = models.list_task_tags(conn, new_task["task_id"])
     assert tags[0]["name"] == "ai"
     assert models.get_task(conn, new_task["task_id"])["idea_path"] != ""
@@ -246,7 +246,7 @@ def test_import_ideas_fenced_json(tmp_path):
     conn.commit(); conn.close()
     f = tmp_path / "ideas.md"
     f.write_text('```json\n[{"hot_item_id": 2, "title": "块内idea", "summary": "s", '
-                 '"score": 6, "dims": "{}", "tags": "", "detail": "内容"}]\n```\n', encoding="utf-8")
+                 '"score": 8, "dims": "{}", "tags": "", "detail": "内容"}]\n```\n', encoding="utf-8")
     r = _run_cli(["import-ideas", "--file", str(f)], tmp_path)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)

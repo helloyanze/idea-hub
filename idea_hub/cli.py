@@ -9,8 +9,8 @@ def _conn(args):
 
 def cmd_collect(args):
     conn = _conn(args)
-    res = collectors.collect_all(conn)
-    print(f"collected={res['collected']}")
+    res = collectors.collect_all(conn, use_scoring=not getattr(args, "no_score", False))
+    print(f"collected={res['collected']} discarded={res['discarded']} review={res['review']}")
     for e in res["errors"]:
         print(f"ERROR: {e}", file=sys.stderr)
 
@@ -80,7 +80,7 @@ def cmd_import_ideas(args):
                                    score_breakdown=item["dims"],
                                    idea_path=_write_draft(args.base, task["id"], content + "\n\n" + addition))
                 task2 = models.get_task(conn, task["id"])
-                if task2["feasibility_score"] >= models.SCORE_THRESHOLD and task2["status"] == "archived":
+                if task2["feasibility_score"] >= models.SCORE_TODO and task2["status"] == "archived":
                     if _todo_quota_ok(conn):
                         models.move_task(conn, task["id"], "todo")
                 results.append({"task_id": task["id"],
@@ -92,6 +92,10 @@ def cmd_import_ideas(args):
                                          hot_item_id=item.get("hot_item_id"),
                                          feasibility_score=item["score"],
                                          score_breakdown=item["dims"], idea_path="")
+                if tid is None:
+                    results.append({"hot_item_id": item.get("hot_item_id"),
+                                    "discarded": True, "reason": "score < 6"})
+                    continue
                 if quota_full:
                     models.move_task(conn, tid, "archived")
                 for tag_id in str(item.get("tags", "")).split(","):
@@ -123,6 +127,9 @@ def cmd_add_idea(args):
                              target_id=models.get_active_target(conn)["id"],
                              hot_item_id=args.hot_item_id, feasibility_score=args.score,
                              score_breakdown=args.dims, idea_path="")
+    if tid is None:
+        print("discarded (score < 6)")  # 新阈值：<6 舍弃
+        return
     if quota_full:
         models.move_task(conn, tid, "archived")
     for tag_id in (args.tags or "").split(","):
@@ -158,7 +165,7 @@ def cmd_relate(args):
                        idea_path=_write_draft(args.base, args.task_id, content + "\n\n## 新增关联信息\n" + addition))
     task = models.get_task(conn, args.task_id)
     new_status = task["status"]
-    if task["feasibility_score"] >= models.SCORE_THRESHOLD and task["status"] == "archived":
+    if task["feasibility_score"] >= models.SCORE_TODO and task["status"] == "archived":
         if _todo_quota_ok(conn):
             models.move_task(conn, args.task_id, "todo"); new_status = "todo"
         else:
@@ -244,7 +251,9 @@ def main():
     p.add_argument("--db", default="data/idea.db")
     p.add_argument("--base", default=str(pathlib.Path.cwd()))
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("collect").set_defaults(func=cmd_collect)
+    pc = sub.add_parser("collect")
+    pc.add_argument("--no-score", action="store_true", help="跳过 LLM 评分（调试）")
+    pc.set_defaults(func=cmd_collect)
     sub.add_parser("candidates").set_defaults(func=cmd_candidates)
     pa = sub.add_parser("add-idea")
     pa.add_argument("--hot-item-id", type=int, required=True)

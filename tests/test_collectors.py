@@ -55,9 +55,9 @@ def test_collect_all_dedupes(conn, tmp_path):
     orig = collectors.fetch_hotlist
     collectors.fetch_hotlist = lambda url, items_path="data", title_field="title", session=None: orig(url, items_path=items_path, title_field=title_field, session=FakeSession(payload))
     try:
-        res = collectors.collect_all(conn)
+        res = collectors.collect_all(conn, use_scoring=False)
         assert res["collected"] == 2
-        res2 = collectors.collect_all(conn)
+        res2 = collectors.collect_all(conn, use_scoring=False)
         assert res2["collected"] == 0  # dedupe
     finally:
         collectors.fetch_hotlist = orig
@@ -70,7 +70,7 @@ def test_rss_items_shape(rss_url):
 
 def test_collect_all_rss(conn, rss_url):
     sid = models.create_source(conn, type="rss", name="RSS源", url=rss_url)
-    res = collectors.collect_all(conn)
+    res = collectors.collect_all(conn, use_scoring=False)
     assert res["errors"] == []
     assert res["collected"] == 2
     rows = conn.execute("SELECT title, url FROM hot_items WHERE source_id=?", (sid,)).fetchall()
@@ -81,7 +81,7 @@ def test_collect_all_error_isolation(conn, rss_url):
     bad = models.create_source(conn, type="hotlist", name="坏源",
                                url="http://127.0.0.1:1/nope")
     good = models.create_source(conn, type="rss", name="好源", url=rss_url)
-    res = collectors.collect_all(conn)
+    res = collectors.collect_all(conn, use_scoring=False)
     assert len(res["errors"]) == 1
     assert "坏源" in res["errors"][0]
     assert res["collected"] == 2
@@ -109,7 +109,7 @@ def test_collect_all_uses_source_config(conn, tmp_path):
     collectors.fetch_hotlist = lambda url, items_path="data", title_field="title", session=None: \
         orig(url, items_path=items_path, title_field=title_field, session=FakeSession(payload))
     try:
-        res = collectors.collect_all(conn)
+        res = collectors.collect_all(conn, use_scoring=False)
         assert res["collected"] == 2
         assert res["errors"] == []
     finally:
@@ -198,7 +198,7 @@ def test_collect_all_keywords_filter(conn, tmp_path):
     collectors.fetch_hotlist = lambda url, items_path="data", title_field="title", session=None: \
         orig(url, items_path=items_path, title_field=title_field, session=FakeSession(payload))
     try:
-        res = collectors.collect_all(conn)
+        res = collectors.collect_all(conn, use_scoring=False)
         assert res["collected"] == 1
         rows = conn.execute("SELECT title FROM hot_items").fetchall()
         assert rows[0]["title"] == "AI 编程助手发布"
@@ -215,7 +215,7 @@ def test_collect_all_new_types_dispatch(conn):
     collectors.fetch_hackernews = lambda limit=30, session=None: [
         {"title": "HN 热帖", "url": "http://h", "content_snapshot": "得分:1"}]
     try:
-        res = collectors.collect_all(conn)
+        res = collectors.collect_all(conn, use_scoring=False)
         assert res["collected"] == 2
         assert res["errors"] == []
     finally:

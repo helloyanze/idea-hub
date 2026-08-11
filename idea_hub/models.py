@@ -1,11 +1,16 @@
 import sqlite3
 
 STATUSES = ("archived", "todo", "waiting", "in_progress", "done")
-SCORE_THRESHOLD = 6
+SCORE_THRESHOLD = 6          # 历史兼容：旧任务/relate 升级用（>=6 可升待办）
+SCORE_TODO = 8               # 新阈值：>=8 待办
+SCORE_ARCHIVE = 6            # 6-7 归档；<6 舍弃
 
 def create_task(conn, *, title, idea_summary, target_id, hot_item_id=None,
                 feasibility_score, score_breakdown, idea_path, notes=""):
-    status = "todo" if feasibility_score >= SCORE_THRESHOLD else "archived"
+    """按新阈值分流：>=8 todo / 6-7 archived / <6 返回 None（舍弃，不创建）。"""
+    if feasibility_score < SCORE_ARCHIVE:
+        return None
+    status = "todo" if feasibility_score >= SCORE_TODO else "archived"
     cur = conn.execute(
         "INSERT INTO tasks (title, idea_summary, idea_path, hot_item_id, target_id, status, feasibility_score, score_breakdown, notes) "
         "VALUES (?,?,?,?,?,?,?,?,?)",

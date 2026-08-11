@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS sources (
     enabled INTEGER NOT NULL DEFAULT 1,
     items_path TEXT NOT NULL DEFAULT 'data',
     title_field TEXT NOT NULL DEFAULT 'title',
-    keywords TEXT NOT NULL DEFAULT ''
+    keywords TEXT NOT NULL DEFAULT '',
+    tier TEXT NOT NULL DEFAULT 'D'
 );
 CREATE TABLE IF NOT EXISTS hot_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,6 +38,12 @@ CREATE TABLE IF NOT EXISTS hot_items (
     url TEXT NOT NULL,
     content_snapshot TEXT NOT NULL DEFAULT '',
     collected_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source_score REAL NOT NULL DEFAULT 0,
+    fact_score REAL NOT NULL DEFAULT 0,
+    verify_score REAL NOT NULL DEFAULT 60,
+    time_score REAL NOT NULL DEFAULT 100,
+    final_score REAL NOT NULL DEFAULT 0,
+    review_status TEXT NOT NULL DEFAULT 'collected',
     UNIQUE (source_id, url)
 );
 CREATE TABLE IF NOT EXISTS task_links (
@@ -95,6 +102,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sources ADD COLUMN title_field TEXT NOT NULL DEFAULT 'title'")
     if "keywords" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
+    if "tier" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN tier TEXT NOT NULL DEFAULT 'D'")
     # sources.type CHECK 约束扩展（SQLite 无法 ALTER CHECK，需重建表）
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
     if sql and "github-trending" not in (sql[0] or ""):
@@ -111,7 +120,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             enabled INTEGER NOT NULL DEFAULT 1,
             items_path TEXT NOT NULL DEFAULT 'data',
             title_field TEXT NOT NULL DEFAULT 'title',
-            keywords TEXT NOT NULL DEFAULT ''
+            keywords TEXT NOT NULL DEFAULT '',
+            tier TEXT NOT NULL DEFAULT 'D'
         )""")
         conn.execute("""INSERT INTO sources (id, type, name, url, enabled, items_path, title_field, keywords)
                         SELECT id, type, name, url, enabled, items_path, title_field, IFNULL(keywords, '')
@@ -119,6 +129,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE sources_old")
         conn.execute("PRAGMA legacy_alter_table=OFF")
         conn.execute("PRAGMA foreign_keys=ON")
+    # hot_items 评分列（评分机制 v1）
+    hcols = {r["name"] for r in conn.execute("PRAGMA table_info(hot_items)").fetchall()}
+    for col, dflt in (("source_score", "0"), ("fact_score", "0"), ("verify_score", "60"),
+                      ("time_score", "100"), ("final_score", "0"),
+                      ("review_status", "'collected'")):
+        if col not in hcols:
+            conn.execute(f"ALTER TABLE hot_items ADD COLUMN {col} REAL NOT NULL DEFAULT {dflt}"
+                         if col != "review_status" else
+                         f"ALTER TABLE hot_items ADD COLUMN {col} TEXT NOT NULL DEFAULT {dflt}")
     # tasks.content_type 旧列（content_types 方案残留）——若存在则删除
     tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
     if "content_type" in tcols:
