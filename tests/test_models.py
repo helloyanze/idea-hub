@@ -64,21 +64,28 @@ def test_backup_db_prunes_to_seven(conn, target_id, tmp_path):
 # ---- update_task（Finding 2：status 值校验） ----
 
 def test_update_task_rejects_invalid_status(conn, target_id):
+    """status 不属于 update_task 可写字段——无论合法/非法值都必须抛 KeyError（状态变更只能走 move_task）。"""
     tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
                              feasibility_score=7, score_breakdown="{}", idea_path="x")
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyError):
         models.update_task(conn, tid, status="done!!")
-    # 非法值未落库，stats() 不会因 KeyError 崩溃
+    with pytest.raises(KeyError):
+        models.update_task(conn, tid, status="waiting")  # 合法值同样被拒绝
+    # 状态未被改动，stats() 正常
     assert models.get_task(conn, tid)["status"] == "todo"
     assert models.stats(conn)["todo"] == 1
 
 
 def test_update_task_normal_fields_unaffected(conn, target_id):
+    """非 status 字段（notes/title/feasibility_score）更新正常；status 字段被拒绝，只能走 move_task。"""
     tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
                              feasibility_score=7, score_breakdown="{}", idea_path="x")
-    models.update_task(conn, tid, notes="reviewed", title="新标题")
+    models.update_task(conn, tid, notes="reviewed", title="新标题", feasibility_score=8)
     task = models.get_task(conn, tid)
-    assert task["notes"] == "reviewed" and task["title"] == "新标题" and task["status"] == "todo"
-    # 合法 status 值仍可通过 update_task 更新
-    models.update_task(conn, tid, status="waiting")
+    assert task["notes"] == "reviewed" and task["title"] == "新标题"
+    assert task["feasibility_score"] == 8 and task["status"] == "todo"
+    # status 不再可写；状态变更必须走 move_task
+    with pytest.raises(KeyError):
+        models.update_task(conn, tid, status="waiting")
+    models.move_task(conn, tid, "waiting")
     assert models.get_task(conn, tid)["status"] == "waiting"

@@ -29,12 +29,10 @@ def list_tasks(conn, status=None, target_id=None):
 
 def update_task(conn, task_id, **fields):
     allowed = {"title", "idea_summary", "feasibility_score", "score_breakdown",
-               "ai_summary", "output_path", "notes", "status"}
+               "ai_summary", "output_path", "notes"}
     sets, args = [], []
     for k, v in fields.items():
         if k not in allowed: raise KeyError(f"unknown field {k}")
-        if k == "status" and v not in STATUSES:
-            raise ValueError(f"bad status {v}")
         sets.append(f"{k}=?"); args.append(v)
     if not sets: return
     args.append(task_id)
