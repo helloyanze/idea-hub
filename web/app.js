@@ -61,24 +61,31 @@ async function openDrawer(id) {
   const hotItem = t.hot_item_id ? `<div>关联热点 #${t.hot_item_id}</div>` : '';
   $('#drawer').innerHTML = `
     <button onclick="closeDrawer()">关闭</button>
-    <h2>${t.title}</h2>
+    <label>标题 <input type="text" id="f-title"></label>
+    <label>构思摘要 <textarea id="f-summary"></textarea></label>
     <label>分数 <input type="range" min="1" max="10" id="f-score" value="${t.feasibility_score}"></label>
     <h3>构思全文</h3><div id="idea-full"></div>
     <h3>评分明细</h3><pre>${prettyBreakdown(t.score_breakdown)}</pre>
     <h3>产出</h3><div>${t.output_path ? `<a href="/outputs/${t.output_path.replace(/^outputs\//,'')}">打开产出</a>` : '无'}</div>
     ${hotItem}
-    <label>备注 <textarea id="f-notes">${t.notes||''}</textarea></label>
+    <label>备注 <textarea id="f-notes"></textarea></label>
     <div class="actions">
       <button onclick="saveTask(${t.id})">保存修改</button>
       <button onclick="runTask(${t.id})">执行</button>
     </div>`;
   $('#idea-full').textContent = t.idea_full || '(无构思文件)';
+  // value 赋值写入外部数据（不解析 HTML，与 idea_full 的 textContent 同级别安全）
+  $('#f-title').value = t.title || '';
+  $('#f-summary').value = t.idea_summary || '';
+  $('#f-notes').value = t.notes || '';
   $('#drawer').hidden = false;
 }
 window.closeDrawer = () => $('#drawer').hidden = true;
 
 async function saveTask(id) {
   await api.patch(`/api/tasks/${id}`, {
+    title: $('#f-title').value,
+    idea_summary: $('#f-summary').value,
     feasibility_score: Number($('#f-score').value),
     notes: $('#f-notes').value
   });
