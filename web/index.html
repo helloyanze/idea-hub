@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Idea Hub</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header id="topbar">
+  <h1>Idea Hub</h1>
+  <select id="target-switch"></select>
+  <button id="btn-sources">来源管理</button>
+  <button id="btn-collect">立即收集</button>
+  <div id="stats"></div>
+</header>
+<main id="board">
+  <section class="col" data-status="archived"><h2>留档</h2><div class="cards"></div></section>
+  <section class="col" data-status="todo"><h2>待办</h2><div class="cards"></div></section>
+  <section class="col" data-status="waiting"><h2>等待</h2><div class="cards"></div></section>
+  <section class="col" data-status="in_progress"><h2>进行中</h2><div class="cards"></div></section>
+  <section class="col" data-status="done"><h2>已完成</h2><div class="cards"></div></section>
+</main>
+<aside id="drawer" hidden></aside>
+<div id="source-modal" hidden></div>
+<script src="/static/vendor/sortable.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

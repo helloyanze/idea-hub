@@ -1,0 +1,179 @@
+/* Idea Hub kanban — single-file stylesheet (~150 lines) */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #f9fafb;
+  color: #1f2937;
+}
+
+/* ---- top bar ---- */
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #111827;
+  color: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+#topbar h1 { font-size: 18px; margin: 0 8px 0 0; }
+#topbar select, #topbar button {
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid #374151;
+  background: #1f2937;
+  color: #fff;
+  cursor: pointer;
+}
+#topbar button:hover { background: #374151; }
+#stats { margin-left: auto; font-size: 12px; color: #9ca3af; }
+
+/* ---- board columns ---- */
+#board {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  align-items: flex-start;
+}
+.col {
+  flex: 1;
+  min-width: 180px;
+  background: #f3f4f6;
+  border-radius: 10px;
+  padding: 10px;
+}
+.col h2 {
+  font-size: 14px;
+  margin: 0 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #e5e7eb;
+  color: #374151;
+}
+.cards {
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.col .cards:empty::after {
+  content: "暂无";
+  color: #9ca3af;
+  font-size: 12px;
+  text-align: center;
+  padding: 24px 0;
+}
+
+/* ---- cards ---- */
+.card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  cursor: grab;
+  border-left: 4px solid transparent;
+}
+.card:active { cursor: grabbing; }
+.card-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.card-meta { font-size: 12px; color: #6b7280; display: flex; gap: 6px; align-items: center; }
+
+/* ---- score badges ---- */
+.badge {
+  display: inline-block;
+  min-width: 22px;
+  text-align: center;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+}
+.badge.red { background: #dc2626; }
+.badge.yellow { background: #d97706; }
+.badge.green { background: #16a34a; }
+
+/* ---- detail drawer (right side) ---- */
+#drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  width: 480px;
+  max-width: 92vw;
+  background: #fff;
+  box-shadow: -4px 0 16px rgba(0,0,0,.15);
+  padding: 20px;
+  overflow-y: auto;
+  z-index: 50;
+}
+#drawer:not([hidden]) { animation: slideIn .25s ease; }
+@keyframes slideIn {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+#drawer h2 { margin-top: 0; }
+#drawer label { display: block; margin: 12px 0; font-size: 13px; }
+#drawer textarea { width: 100%; min-height: 80px; }
+#drawer pre {
+  background: #f3f4f6;
+  padding: 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+#drawer .actions { display: flex; gap: 8px; margin-top: 16px; }
+#drawer button, #source-modal button {
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  cursor: pointer;
+}
+#drawer button:hover, #source-modal button:hover { background: #f3f4f6; }
+
+/* ---- sources modal ---- */
+#source-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, .5);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#source-modal:not([hidden]) { animation: fadeIn .15s ease; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+#source-modal .modal-box {
+  background: #fff;
+  border-radius: 10px;
+  padding: 20px;
+  width: 520px;
+  max-width: 92vw;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+#source-modal .src-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f3f4f6;
+  font-size: 13px;
+}
+#source-modal .src-add {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr auto;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+#source-modal input {
+  font-size: 13px;
+  padding: 5px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}

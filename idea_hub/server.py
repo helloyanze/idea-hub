@@ -154,18 +154,25 @@ def create_app(db_path: str) -> FastAPI:
             models.set_setting(c, body.key, body.value)
             return {"ok": True}
 
-    web_dir = pathlib.Path(__file__).parent.parent / "web"
+    repo_root = pathlib.Path(__file__).parent.parent
+    web_dir = repo_root / "web"
     if web_dir.exists():
         app.mount("/static", StaticFiles(directory=web_dir), name="static")
+        outputs_dir = repo_root / "outputs"
+        if outputs_dir.exists():
+            app.mount("/outputs", StaticFiles(directory=outputs_dir), name="outputs")
         @app.get("/")
         def index():
             return FileResponse(web_dir / "index.html")
 
     return app
 
+# 模块级 app 供 `uvicorn idea_hub.server:app` 导入（Task 8 cron 也依赖此入口）
+app = create_app("data/idea.db")
+
 def main():
     import uvicorn
-    uvicorn.run(create_app("data/idea.db"), host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
 
 if __name__ == "__main__":
     main()
