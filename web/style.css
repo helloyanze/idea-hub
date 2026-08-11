@@ -302,12 +302,40 @@ details[open] summary{margin-bottom:8px}
 .batchbar .btn.danger:hover{filter:brightness(1.08)}
 
 /* ============ 响应式 ============ */
+/* 窄屏更多菜单（下拉面板） */
+.more-menu{
+  position:fixed; top:56px; right:12px; z-index:35;
+  background:var(--card); border:1px solid var(--border); border-radius:10px;
+  box-shadow:var(--shadow-lg); padding:6px; display:flex; flex-direction:column; gap:4px;
+  min-width:150px;
+}
+.more-menu .btn{justify-content:flex-start;height:34px}
+
 @media (max-width:1100px){
   .group.manage{display:none}
   .more{display:inline-flex}
 }
-@media (max-width:720px){
+@media (max-width:860px){
+  .brand small{display:none}
   .search input,.search input:focus{width:130px}
+  .group.action .switch span:first-child{display:none}  /* 只留开关本体 */
+  .stat-label{display:none}                              /* 统计只留圆点+数字 */
+  .stat{padding:0 8px}
+}
+@media (max-width:720px){
+  .header{gap:8px;padding:8px 10px}
+  .brand{font-size:14px}
+  .group{padding-left:8px;gap:4px}
+  .btn{padding:0 8px}
+  .select{max-width:110px;font-size:12px}
   .stats .stat b{font-size:12px}
-  .col{flex-basis:84vw}
+  .col{flex-basis:84vw;flex-shrink:0}
+  .board{padding:10px;gap:10px}
+  .drawer{width:100vw;max-width:100vw}
+}
+@media (max-width:480px){
+  .select{max-width:96px}
+  .search input,.search input:focus{width:100px}
+  .card{padding:10px 10px 10px 30px}
+  .col{flex-basis:88vw}
 }

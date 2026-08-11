@@ -506,6 +506,19 @@ $("#drSave").addEventListener("click", async () => {
 $("#drDel").addEventListener("click", () => curId && delTask(curId));
 $("#openSource").addEventListener("click", () => { renderSources(); openModal("#sourceModal"); });
 $("#openTag").addEventListener("click", () => { renderTags(); openModal("#tagModal"); });
+
+/* 窄屏更多菜单 */
+const moreMenu = $("#moreMenu");
+$("#btn-more").addEventListener("click", e => {
+  e.stopPropagation();
+  moreMenu.hidden = !moreMenu.hidden;
+});
+$("#more-source").addEventListener("click", () => { moreMenu.hidden = true; renderSources(); openModal("#sourceModal"); });
+$("#more-tag").addEventListener("click", () => { moreMenu.hidden = true; renderTags(); openModal("#tagModal"); });
+$("#more-collect").addEventListener("click", () => { moreMenu.hidden = true; $("#collectBtn").click(); });
+document.addEventListener("click", e => {
+  if (!moreMenu.hidden && !e.target.closest("#btn-more") && !e.target.closest("#moreMenu")) moreMenu.hidden = true;
+});
 document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", e => {
   e.target.closest(".modal").classList.remove("show");
 }));
