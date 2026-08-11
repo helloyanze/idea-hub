@@ -11,8 +11,12 @@ def create_task(conn, *, title, idea_summary, target_id, hot_item_id=None,
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (title, idea_summary, idea_path, hot_item_id, target_id, status,
          feasibility_score, score_breakdown, notes))
+    tid = cur.lastrowid
+    if hot_item_id is not None:
+        conn.execute("INSERT OR IGNORE INTO task_links (task_id, hot_item_id) VALUES (?,?)",
+                     (tid, hot_item_id))
     conn.commit()
-    return cur.lastrowid
+    return tid
 
 def get_task(conn, task_id):
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -28,7 +32,7 @@ def list_tasks(conn, status=None, target_id=None):
     return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 def update_task(conn, task_id, **fields):
-    allowed = {"title", "idea_summary", "feasibility_score", "score_breakdown",
+    allowed = {"title", "idea_summary", "idea_path", "feasibility_score", "score_breakdown",
                "ai_summary", "output_path", "notes"}
     sets, args = [], []
     for k, v in fields.items():
