@@ -48,7 +48,8 @@
    与 Web 后端复用。
 4. **Hermes 定时任务**：两个 cron——每日收集热点并生成 idea 入列；周期检查
    等待队列并执行任务。
-5. **产出目录（outputs/）**：按 `tasks/<task_id>/` 组织 markdown 正文，
+5. **产出目录（outputs/）**：按 `tasks/<task_id>/` 组织 markdown 文件——
+   `idea.md`（初步构思全文）与 `output.md`（执行产出，完成后生成）。
    任务记录只存摘要与相对路径。
 
 关键决策：AI 能力全部由 Hermes agent 承载（cron 与手动触发），Web 应用零
@@ -88,12 +89,23 @@ AI 逻辑。职责清晰，且 AI 部分完全复用 Hermes 的技能与模型�
 
 唯一约束：(source_id, url)，防止重复收集。
 
+### task_links（任务-热点关联表）
+
+| 字段 | 说明 |
+|---|---|
+| task_id | 外键 → tasks |
+| hot_item_id | 外键 → hot_items |
+
+多对多关联：一个任务可关联多个热点（初始热点 + 后续相关热点），
+支撑关联信息驱动的评分更新。
+
 ### tasks（任务表，即 idea）
 
 | 字段 | 说明 |
 |---|---|
 | id | 主键 |
-| title / description | idea 标题与初步构思 |
+| title / idea_summary | idea 标题与构思摘要 |
+| idea_path | 初步构思全文路径（outputs/tasks/<id>/idea.md） |
 | hot_item_id | 外键，关联来源热点（可空） |
 | target_id | 外键 → targets |
 | status | `archived` / `todo` / `waiting` / `in_progress` / `done` |
@@ -108,6 +120,8 @@ AI 逻辑。职责清晰，且 AI 部分完全复用 Hermes 的技能与模型�
 - 五队列不是独立表，而是 tasks 的 status 字段。拖拽移动即一次状态更新。
 - 评分维度挂在目标模式上，不同目标使用不同评分维度。
 - 跨来源重复热点不做自动合并；由 Hermes 生成 idea 时识别相似 idea 并跳过。
+- 任务与热点多对多关联（task_links），支持后续相关热点触发评分更新。
+- tasks.hot_item_id 为初始来源热点（生成时的主关联）；task_links 为全量关联（含后续相关热点）。
 
 ### settings（全局设置表）
 
@@ -121,11 +135,15 @@ key-value 结构：评分阈值（默认 6）、收集时间、自动执行频�
 触发 → collect.py 抓取所有启用来源（热榜 API + RSS，写入 hot_items 去重）
     → Hermes agent 按当前激活目标的维度，判断每条热点是否值得生成 idea
       （过滤低价值与重复主题）
-    → 生成 idea：标题 + 初步构思 + 分维度评分(1-10) + 解释
+    → 关联检测：将新热点与已有任务（重点为留档任务）比对相关性；
+      相关则追加关联（task_links）、更新构思文件、按新信息重新评分
+      → 新评分 >= 6 的任务移入待办（todo）
+    → 为新热点生成 idea：标题 + 构思全文（写入 tasks/<id>/idea.md）+
+      分维度评分(1-10) + 解释；任务记录存摘要与路径
     → 写入 tasks，按规则入列：
         score >= 6  → status = todo（待办）
         score <  6  → status = archived（留档）
-    → 通过 Web 界面查看当日收集结果
+    → 通过 Web 界面查看当日收集结果（含关联更新的任务）
 ```
 
 ### 流程 B：任务执行（两种触发）
@@ -137,7 +155,7 @@ key-value 结构：评分阈值（默认 6）、收集时间、自动执行频�
         ↓
 Hermes agent 按任务目标执行创作（如生成文章正文）
         ↓
-正文写入 outputs/tasks/<task_id>/ 目录
+正文写入 outputs/tasks/<task_id>/output.md
 任务记录更新：ai_summary、output_path
         ↓
 status = done（已完成）
@@ -186,7 +204,7 @@ status = done（已完成）
 | 交互 | 实现 |
 |---|---|
 | 跨队列移动 | SortableJS 拖拽（含已完成→进行中/待办的反向拖回） |
-| 查看详情 | 点击卡片 → 右侧滑出详情面板：构思全文、评分明细、关联热点、产出链接、时间线 |
+| 查看详情 | 点击卡片 → 右侧滑出详情面板：构思全文（读取 idea.md）、评分明细、关联热点列表、产出链接、时间线 |
 | 修改 | 详情面板内联编辑：标题、构思、分数（滑块）、备注 |
 | 手动执行 | 等待/进行中队列顶部"执行"按钮 → 调起后台 Hermes 任务 |
 | 目标切换 | 顶部下拉切换 → 界面按 target 过滤显示 |
@@ -212,6 +230,7 @@ status = done（已完成）
   留档）、去重。
 - API 测试：任务 CRUD、状态更新、来源管理接口。
 - 流程测试：模拟"收集 → 入列 → 执行 → 完成"全链路（用假数据源）。
+- 关联更新测试：模拟相关热点二次收集 → 构思追加 → 评分更新 → 移入待办。
 - 前端无构建步骤，核心逻辑（拖拽、过滤）集中在少量 JS，人工走查。
 
 ## 明确不做（YAGNI）
