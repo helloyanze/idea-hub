@@ -177,3 +177,20 @@ body {
   border: 1px solid #d1d5db;
   border-radius: 6px;
 }
+
+/* ---- tag badges ---- */
+.type-badge {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.card-summary {
+  margin-top: 4px;
+  color: #666;
+  font-size: 12px;
+}

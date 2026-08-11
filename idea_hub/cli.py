@@ -36,6 +36,12 @@ def cmd_candidates(args):
         if r["id"] not in linked:
             print(json.dumps(dict(r), ensure_ascii=False))
 
+def _todo_quota_ok(conn):
+    """待办配额检查：todo 数量达到上限则返回 False（新 idea 应转留档）。"""
+    limit = int(models.get_setting(conn, "todo_limit", "10"))
+    count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='todo'").fetchone()[0]
+    return count < limit
+
 def cmd_add_idea(args):
     conn = _conn(args)
     content = pathlib.Path(args.detail_path).read_text(encoding="utf-8")
@@ -43,6 +49,12 @@ def cmd_add_idea(args):
                              target_id=models.get_active_target(conn)["id"],
                              hot_item_id=args.hot_item_id, feasibility_score=args.score,
                              score_breakdown=args.dims, idea_path="")
+    if models.get_task(conn, tid)["status"] == "todo" and not _todo_quota_ok(conn):
+        models.move_task(conn, tid, "archived")
+    for tag_id in (args.tags or "").split(","):
+        tag_id = tag_id.strip()
+        if tag_id.isdigit():
+            models.add_task_tag(conn, tid, int(tag_id))
     models.update_task(conn, tid, idea_path=_write_draft(args.base, tid, content))
     conn.execute("INSERT OR IGNORE INTO task_links (task_id, hot_item_id) VALUES (?,?)",
                  (tid, args.hot_item_id))
@@ -73,7 +85,10 @@ def cmd_relate(args):
     task = models.get_task(conn, args.task_id)
     new_status = task["status"]
     if task["feasibility_score"] >= models.SCORE_THRESHOLD and task["status"] == "archived":
-        models.move_task(conn, args.task_id, "todo"); new_status = "todo"
+        if _todo_quota_ok(conn):
+            models.move_task(conn, args.task_id, "todo"); new_status = "todo"
+        else:
+            new_status = "archived (todo quota full)"
     conn.commit()
     print(new_status)
 
@@ -164,6 +179,7 @@ def main():
     pa.add_argument("--score", type=int, required=True)
     pa.add_argument("--dims", required=True)
     pa.add_argument("--detail-path", required=True)
+    pa.add_argument("--tags", default="", help="标签 id 列表，逗号分隔（如 1,2,3）")
     pa.set_defaults(func=cmd_add_idea)
     pr = sub.add_parser("relate")
     pr.add_argument("--task-id", type=int, required=True)

@@ -86,9 +86,9 @@ def get_active_target(conn):
 def list_targets(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM targets ORDER BY id").fetchall()]
 
-def create_source(conn, *, type, name, url, enabled=True, items_path="data", title_field="title"):
-    cur = conn.execute("INSERT INTO sources (type, name, url, enabled, items_path, title_field) VALUES (?,?,?,?,?,?)",
-                       (type, name, url, 1 if enabled else 0, items_path, title_field))
+def create_source(conn, *, type, name, url, enabled=True, items_path="data", title_field="title", keywords=""):
+    cur = conn.execute("INSERT INTO sources (type, name, url, enabled, items_path, title_field, keywords) VALUES (?,?,?,?,?,?,?)",
+                       (type, name, url, 1 if enabled else 0, items_path, title_field, keywords))
     conn.commit()
     return cur.lastrowid
 
@@ -110,3 +110,36 @@ def set_setting(conn, key, value):
     conn.execute("INSERT INTO settings (key, value) VALUES (?,?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
     conn.commit()
+
+# ---- tags（主题标签，可自定义）----
+
+def create_tag(conn, *, name, description=""):
+    cur = conn.execute("INSERT INTO tags (name, description, is_active) VALUES (?,?,1)",
+                       (name, description))
+    conn.commit()
+    return cur.lastrowid
+
+def list_tags(conn, active_only=False):
+    sql = "SELECT * FROM tags"
+    if active_only:
+        sql += " WHERE is_active=1"
+    sql += " ORDER BY id"
+    return [dict(r) for r in conn.execute(sql).fetchall()]
+
+def set_tag_active(conn, tag_id, active):
+    conn.execute("UPDATE tags SET is_active=? WHERE id=?", (1 if active else 0, tag_id))
+    conn.commit()
+
+def delete_tag(conn, tag_id):
+    conn.execute("DELETE FROM task_tags WHERE tag_id=?", (tag_id,))
+    conn.execute("DELETE FROM tags WHERE id=?", (tag_id,))
+    conn.commit()
+
+def add_task_tag(conn, task_id, tag_id):
+    conn.execute("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?,?)", (task_id, tag_id))
+    conn.commit()
+
+def list_task_tags(conn, task_id):
+    rows = conn.execute("SELECT t.id, t.name FROM task_tags tt JOIN tags t ON t.id=tt.tag_id "
+                        "WHERE tt.task_id=? ORDER BY t.id", (task_id,)).fetchall()
+    return [dict(r) for r in rows]

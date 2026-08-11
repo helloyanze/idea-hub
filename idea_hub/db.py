@@ -9,14 +9,26 @@ CREATE TABLE IF NOT EXISTS targets (
     score_dimensions TEXT NOT NULL DEFAULT '{}',
     is_active INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    is_active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS task_tags (
+    task_id INTEGER NOT NULL REFERENCES tasks(id),
+    tag_id INTEGER NOT NULL REFERENCES tags(id),
+    PRIMARY KEY (task_id, tag_id)
+);
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK (type IN ('hotlist','rss')),
+    type TEXT NOT NULL CHECK (type IN ('hotlist','rss','github-trending','hackernews')),
     name TEXT NOT NULL,
     url TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     items_path TEXT NOT NULL DEFAULT 'data',
-    title_field TEXT NOT NULL DEFAULT 'title'
+    title_field TEXT NOT NULL DEFAULT 'title',
+    keywords TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS hot_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,12 +86,61 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """轻量迁移：为已有数据库补充新增列（CREATE TABLE IF NOT EXISTS 不处理已存在表）。"""
+    """轻量迁移：为已有数据库补充新增表/列/约束（CREATE TABLE IF NOT EXISTS 不处理已存在对象）。"""
+    # sources 新列
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(sources)").fetchall()}
     if "items_path" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN items_path TEXT NOT NULL DEFAULT 'data'")
     if "title_field" not in cols:
         conn.execute("ALTER TABLE sources ADD COLUMN title_field TEXT NOT NULL DEFAULT 'title'")
+    if "keywords" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
+    # sources.type CHECK 约束扩展（SQLite 无法 ALTER CHECK，需重建表）
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
+    if sql and "github-trending" not in (sql[0] or ""):
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("ALTER TABLE sources RENAME TO sources_old")
+        conn.execute("""CREATE TABLE sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL CHECK (type IN ('hotlist','rss','github-trending','hackernews')),
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            items_path TEXT NOT NULL DEFAULT 'data',
+            title_field TEXT NOT NULL DEFAULT 'title',
+            keywords TEXT NOT NULL DEFAULT ''
+        )""")
+        conn.execute("""INSERT INTO sources (id, type, name, url, enabled, items_path, title_field, keywords)
+                        SELECT id, type, name, url, enabled, items_path, title_field, IFNULL(keywords, '')
+                        FROM sources_old""")
+        conn.execute("DROP TABLE sources_old")
+        conn.execute("PRAGMA foreign_keys=ON")
+    # tasks.content_type 旧列（content_types 方案残留）——若存在则删除
+    tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "content_type" in tcols:
+        try:
+            conn.execute("ALTER TABLE tasks DROP COLUMN content_type")
+        except sqlite3.OperationalError:
+            pass  # 旧版 SQLite 不支持 DROP COLUMN，保留无害
+    # 旧 content_types 表（早期方案残留）——若存在则重命名为 tags 并转移数据
+    has_ct = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_types'").fetchone()[0]
+    if has_ct:
+        conn.execute("ALTER TABLE content_types RENAME TO tags_old")
+        conn.execute("CREATE TABLE IF NOT EXISTS tags ("
+                     "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+                     "description TEXT NOT NULL DEFAULT '', is_active INTEGER NOT NULL DEFAULT 1)")
+        conn.execute("INSERT OR IGNORE INTO tags (id, name, description, is_active) "
+                     "SELECT id, name, description, is_active FROM tags_old")
+        conn.execute("DROP TABLE tags_old")
+    # tags 默认数据（仅当表为空时）
+    if conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 0:
+        conn.executemany("INSERT INTO tags (name, description) VALUES (?,?)", [
+            ("AI", "人工智能相关"),
+            ("Agent", "智能体/自主代理"),
+            ("新技术", "新兴技术与趋势"),
+            ("工具", "实用工具与产品"),
+            ("行业观察", "行业动态与商业分析"),
+        ])
 
 def backup_db(conn: sqlite3.Connection, backups_dir: str) -> str:
     pathlib.Path(backups_dir).mkdir(parents=True, exist_ok=True)

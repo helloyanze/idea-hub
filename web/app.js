@@ -6,6 +6,8 @@ const api = {
   delete: (p) => fetch(p, {method:'DELETE'}).then(r=>r.json()),
 };
 let currentTarget = null;
+let currentTag = '';
+let tags = [];  // [{id, name, description, is_active}]
 
 const COLUMN_NAMES = {archived:'留档', todo:'待办', waiting:'等待', in_progress:'进行中', done:'已完成'};
 
@@ -21,11 +23,27 @@ function badge(score) {
   return `<span class="badge ${cls}">${score}</span>`;
 }
 
+function tagBadges(tagsArr) {
+  return (tagsArr || []).map(t => `<span class="type-badge">${escapeHtml(t.name)}</span>`).join(' ');
+}
+
 function cardHTML(t) {
   return `<div class="card" data-id="${t.id}">
     <div class="card-title">${escapeHtml(t.title)}</div>
-    <div class="card-meta">${badge(t.feasibility_score)} ${escapeHtml((t.idea_summary||'').slice(0,60))}</div>
+    <div class="card-meta">${badge(t.feasibility_score)} ${tagBadges(t.tags)}</div>
+    <div class="card-summary">${escapeHtml((t.idea_summary||'').slice(0,60))}</div>
   </div>`;
+}
+
+async function loadTags() {
+  const d = await api.get('/api/tags');
+  tags = d.items;
+  const sel = $('#type-filter');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部标签</option>' +
+    tags.map(t => `<option value="${t.id}">${escapeHtml(t.name)}${t.is_active ? '' : ' (停用)'}</option>`).join('');
+  sel.value = cur;
+  sel.onchange = () => { currentTag = sel.value; loadBoard(); };
 }
 
 async function loadBoard() {
@@ -34,7 +52,10 @@ async function loadBoard() {
   const st = await api.get(`/api/stats${q}`);
   for (const [status, col] of Object.entries(COLUMN_NAMES)) {
     const box = document.querySelector(`.col[data-status="${status}"] .cards`);
-    box.innerHTML = data.items.filter(t => t.status === status).map(cardHTML).join('');
+    box.innerHTML = data.items
+      .filter(t => t.status === status)
+      .filter(t => !currentTag || (t.tags || []).some(x => String(x.id) === currentTag))
+      .map(cardHTML).join('');
   }
   $('#stats').textContent = Object.entries(st).map(([k,v]) => `${COLUMN_NAMES[k]||k}:${v}`).join(' | ');
 }
@@ -126,21 +147,44 @@ async function loadSources() {
       <input id="src-url" placeholder="URL">
       <input id="src-items-path" placeholder="条目路径(默认 data)">
       <input id="src-title-field" placeholder="标题字段(默认 title)">
+      <input id="src-keywords" placeholder="关键词白名单(逗号分隔，空=不过滤)">
       <button onclick="addSource()">添加</button>
     </div>` +
-    d.items.map(s => `<div class="src-row">${escapeHtml(s.name)} (${escapeHtml(s.type)}) ${s.enabled?'启用':'停用'}
-      <span><button onclick="toggleSource(${s.id})">切换</button>
-      <button onclick="delSource(${s.id})">删除</button></span></div>`).join('') +
+    d.items.map(s => `<div class="src-row">${escapeHtml(s.name)} (${escapeHtml(s.type)}) ${s.enabled?'启用':'停用'}\n      <span><button onclick="toggleSource(${s.id})">切换</button>\n      <button onclick="delSource(${s.id})">删除</button></span></div>`).join('') +
     `<button onclick="closeSources()">关闭</button></div>`;
   $('#source-modal').hidden = false;
 }
+
+// tags modal: 主题标签管理（可自定义）
+async function loadTagsModal() {
+  const d = await api.get('/api/tags');
+  $('#type-modal').innerHTML = `<div class="modal-box"><h3>标签管理</h3>
+    <div class="src-add">
+      <input id="ct-name" placeholder="标签名(如 langchain/agent/skills)">
+      <input id="ct-desc" placeholder="描述(可选)">
+      <button onclick="addTag()">添加</button>
+    </div>` +
+    d.items.map(t => `<div class="src-row">${escapeHtml(t.name)} ${t.is_active?'启用':'停用'} — ${escapeHtml(t.description)}
+      <span><button onclick="toggleTag(${t.id})">切换</button>
+      <button onclick="delTag(${t.id})">删除</button></span></div>`).join('') +
+    `<button onclick="closeTypes()">关闭</button></div>`;
+  $('#type-modal').hidden = false;
+}
+window.addTag = async () => {
+  await api.post('/api/tags', {name: $('#ct-name').value, description: $('#ct-desc').value || ''});
+  loadTagsModal(); loadTags();
+};
+window.toggleTag = async (id) => { await api.post(`/api/tags/${id}/toggle`); loadTagsModal(); loadTags(); };
+window.delTag = async (id) => { await api.delete(`/api/tags/${id}`); loadTagsModal(); loadTags(); };
+window.closeTypes = () => $('#type-modal').hidden = true;
 window.addSource = async () => {
   await api.post('/api/sources', {
     type: $('#src-type').value || 'hotlist',
     name: $('#src-name').value,
     url: $('#src-url').value,
     items_path: $('#src-items-path').value || 'data',
-    title_field: $('#src-title-field').value || 'title'
+    title_field: $('#src-title-field').value || 'title',
+    keywords: $('#src-keywords').value || ''
   });
   loadSources();
 };
@@ -150,9 +194,11 @@ window.closeSources = () => $('#source-modal').hidden = true;
 
 async function init() {
   $('#btn-sources').onclick = loadSources;
+  $('#btn-types').onclick = loadTagsModal;
   $('#btn-collect').onclick = () => alert('收集由每日定时任务执行；如需立即收集请运行：uv run python -m idea_hub.cli collect');
   initSortable();
   await loadTargets();
+  await loadTags();
   await loadBoard();
 }
 init();

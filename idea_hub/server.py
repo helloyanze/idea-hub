@@ -36,6 +36,11 @@ class SourceIn(BaseModel):
     url: str
     items_path: str = "data"
     title_field: str = "title"
+    keywords: str = ""
+
+class TagIn(BaseModel):
+    name: str
+    description: str = ""
 
 class SettingIn(BaseModel):
     key: str
@@ -56,7 +61,10 @@ def create_app(db_path: str) -> FastAPI:
     @app.get("/api/tasks")
     def list_tasks(status: str | None = None, target_id: int | None = None):
         with conn() as c:
-            return {"items": models.list_tasks(c, status, target_id)}
+            items = models.list_tasks(c, status, target_id)
+            for t in items:
+                t["tags"] = models.list_task_tags(c, t["id"])
+            return {"items": items}
 
     @app.get("/api/tasks/{task_id}")
     def get_task(task_id: int):
@@ -67,6 +75,7 @@ def create_app(db_path: str) -> FastAPI:
                 t["idea_full"] = pathlib.Path(t["idea_path"]).read_text(encoding="utf-8")
             else:
                 t["idea_full"] = ""
+            t["tags"] = models.list_task_tags(c, task_id)
             return t
 
     @app.post("/api/tasks")
@@ -133,7 +142,8 @@ def create_app(db_path: str) -> FastAPI:
     def create_source(body: SourceIn):
         with conn() as c:
             sid = models.create_source(c, type=body.type, name=body.name, url=body.url,
-                                        items_path=body.items_path, title_field=body.title_field)
+                                        items_path=body.items_path, title_field=body.title_field,
+                                        keywords=body.keywords)
             return {"id": sid}
 
     @app.post("/api/sources/{source_id}/toggle")
@@ -157,6 +167,45 @@ def create_app(db_path: str) -> FastAPI:
             c.execute("DELETE FROM hot_items WHERE source_id=?", (source_id,))
             c.execute("DELETE FROM sources WHERE id=?", (source_id,))
             c.commit()
+            return {"ok": True}
+
+    @app.get("/api/tags")
+    def list_tags(active_only: bool = False):
+        with conn() as c:
+            return {"items": models.list_tags(c, active_only=active_only)}
+
+    @app.post("/api/tags")
+    def create_tag(body: TagIn):
+        with conn() as c:
+            tid = models.create_tag(c, name=body.name, description=body.description)
+            return {"id": tid}
+
+    @app.post("/api/tags/{tag_id}/toggle")
+    def toggle_tag(tag_id: int):
+        with conn() as c:
+            tag = next((t for t in models.list_tags(c) if t["id"] == tag_id), None)
+            if not tag:
+                raise HTTPException(404, "tag not found")
+            models.set_tag_active(c, tag_id, not tag["is_active"])
+            return {"ok": True}
+
+    @app.delete("/api/tags/{tag_id}")
+    def delete_tag(tag_id: int):
+        with conn() as c:
+            models.delete_tag(c, tag_id)
+            return {"ok": True}
+
+    @app.post("/api/tasks/{task_id}/tags")
+    def add_task_tag(task_id: int, body: TagIn):
+        with conn() as c:
+            if not models.get_task(c, task_id):
+                raise HTTPException(404, "task not found")
+            tag = next((t for t in models.list_tags(c) if t["name"] == body.name), None)
+            if not tag:
+                tag_id = models.create_tag(c, name=body.name)
+            else:
+                tag_id = tag["id"]
+            models.add_task_tag(c, task_id, tag_id)
             return {"ok": True}
 
     @app.get("/api/settings")

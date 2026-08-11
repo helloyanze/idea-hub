@@ -9,7 +9,11 @@
 <header id="topbar">
   <h1>Idea Hub</h1>
   <select id="target-switch"></select>
+  <select id="type-filter">
+    <option value="">全部标签</option>
+  </select>
   <button id="btn-sources">来源管理</button>
+  <button id="btn-types">标签管理</button>
   <button id="btn-collect">立即收集</button>
   <div id="stats"></div>
 </header>
@@ -22,6 +26,7 @@
 </main>
 <aside id="drawer" hidden></aside>
 <div id="source-modal" hidden></div>
+<div id="type-modal" hidden></div>
 <script src="/static/vendor/sortable.min.js"></script>
 <script src="/static/app.js"></script>
 </body>

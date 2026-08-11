@@ -166,3 +166,40 @@ def test_next_task_id_missing_task(tmp_path):
     r = _run_cli(["next", "--task-id", "999"], tmp_path)
     assert r.returncode == 1
     assert "999" in r.stderr
+
+def test_add_idea_todo_quota(tmp_path):
+    """待办上限：todo 满时新 idea 自动转留档。"""
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    models.set_setting(conn, "todo_limit", "3")
+    for i in range(3):
+        models.create_task(conn, title=f"任务{i}", idea_summary="s", target_id=1,
+                           feasibility_score=7, score_breakdown="{}", idea_path="")
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点Q', 'http://q')")
+    conn.commit(); conn.close()
+    draft = tmp_path / "d3.md"; draft.write_text("构思", encoding="utf-8")
+    r = _run_cli(["add-idea", "--hot-item-id", "2", "--title", "超额任务",
+                  "--summary", "s", "--score", "7", "--dims", "{}",
+                  "--detail-path", str(draft)], tmp_path)
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    # 第 4 个任务因配额进留档
+    row = conn.execute("SELECT status FROM tasks WHERE title='超额任务'").fetchone()
+    assert row["status"] == "archived"
+    assert conn.execute("SELECT COUNT(*) FROM tasks WHERE status='todo'").fetchone()[0] == 3
+    conn.close()
+
+def test_add_idea_with_tags(tmp_path):
+    """add-idea --tags 写入任务标签。"""
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    tag_id = models.create_tag(conn, name="agent")
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点T', 'http://t')")
+    conn.commit(); conn.close()
+    draft = tmp_path / "d4.md"; draft.write_text("构思", encoding="utf-8")
+    r = _run_cli(["add-idea", "--hot-item-id", "2", "--title", "带标签任务",
+                  "--summary", "s", "--score", "7", "--dims", "{}",
+                  "--detail-path", str(draft), "--tags", str(tag_id)], tmp_path)
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    tags = conn.execute("SELECT t.name FROM task_tags tt JOIN tags t ON t.id=tt.tag_id").fetchall()
+    assert tags[0]["name"] == "agent"
+    conn.close()

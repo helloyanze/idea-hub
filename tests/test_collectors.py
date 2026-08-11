@@ -130,3 +130,93 @@ def test_migration_adds_columns(tmp_path):
     row = conn.execute("SELECT * FROM sources").fetchone()
     assert row["items_path"] == "data" and row["title_field"] == "title"
     conn.close()
+
+# ---- 新爬虫 + 关键词过滤测试 ----
+
+def test_matches_keywords():
+    item = {"title": "LangChain 新版本发布", "url": "http://x", "content_snapshot": "agent 工具"}
+    assert collectors._matches_keywords(item, "langchain, agent")
+    # 关键词是子串匹配，注意误匹配（如 langchAI n 含 "ai"）——用无子串冲突的词验证
+    assert collectors._matches_keywords(item, "zzzz") is False
+    assert collectors._matches_keywords(item, "") is True    # 空=不过滤
+
+def test_fetch_github_trending_parse():
+    html = """<html><body>
+      <article class="Box-row">
+        <h2><a href="/langchain-ai/langchain">langchain-ai / langchain</a></h2>
+        <p>构建 LLM 应用的框架</p>
+        <span class="d-inline-block float-sm-right">1,234 stars today</span>
+      </article>
+      <article class="Box-row">
+        <h2><a href="/foo/bar">foo / bar</a></h2>
+        <p>另一个项目</p>
+      </article>
+    </body></html>"""
+    class FakeResp:
+        text = html
+        def raise_for_status(self): pass
+    class FakeSession:
+        def get(self, url, timeout=None, headers=None): return FakeResp()
+    items = collectors.fetch_github_trending(session=FakeSession())
+    assert items[0]["title"] == "langchain-ai/langchain"
+    assert items[0]["url"] == "https://github.com/langchain-ai/langchain"
+    assert "1,234 stars today" in items[0]["content_snapshot"]
+    assert len(items) == 2
+
+def test_fetch_hackernews_shape():
+    import json
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+        def get(self, url, timeout=None):
+            self.calls.append(url)
+            if url.endswith("topstories.json"):
+                return _JsonResp([1, 2])
+            data = {"id": int(url.split("/item/")[1].split(".")[0]),
+                    "type": "story", "title": f"HN 故事 {url[-5]}",
+                    "url": "http://ext", "score": 100, "descendants": 20}
+            return _JsonResp(data)
+    class _JsonResp:
+        def __init__(self, obj): self._obj = obj
+        def raise_for_status(self): pass
+        @property
+        def text(self): return json.dumps(self._obj)
+    items = collectors.fetch_hackernews(limit=2, session=FakeSession())
+    assert len(items) == 2
+    assert items[0]["title"].startswith("HN 故事")
+    assert "得分:100" in items[0]["content_snapshot"]
+
+def test_collect_all_keywords_filter(conn, tmp_path):
+    """关键词白名单过滤生效。"""
+    sid = models.create_source(conn, type="hotlist", name="过滤源", url="http://x",
+                               keywords="ai, agent")
+    payload = {"data": [
+        {"title": "AI 编程助手发布", "url": "http://a"},
+        {"title": "某明星绯闻", "url": "http://b"},
+    ]}
+    orig = collectors.fetch_hotlist
+    collectors.fetch_hotlist = lambda url, items_path="data", title_field="title", session=None: \
+        orig(url, items_path=items_path, title_field=title_field, session=FakeSession(payload))
+    try:
+        res = collectors.collect_all(conn)
+        assert res["collected"] == 1
+        rows = conn.execute("SELECT title FROM hot_items").fetchall()
+        assert rows[0]["title"] == "AI 编程助手发布"
+    finally:
+        collectors.fetch_hotlist = orig
+
+def test_collect_all_new_types_dispatch(conn):
+    """github-trending / hackernews 类型分发。"""
+    sid1 = models.create_source(conn, type="github-trending", name="GT", url="")
+    sid2 = models.create_source(conn, type="hackernews", name="HN", url="")
+    orig_gt, orig_hn = collectors.fetch_github_trending, collectors.fetch_hackernews
+    collectors.fetch_github_trending = lambda url="", session=None: [
+        {"title": "repo/x", "url": "http://g", "content_snapshot": "stars"}]
+    collectors.fetch_hackernews = lambda limit=30, session=None: [
+        {"title": "HN 热帖", "url": "http://h", "content_snapshot": "得分:1"}]
+    try:
+        res = collectors.collect_all(conn)
+        assert res["collected"] == 2
+        assert res["errors"] == []
+    finally:
+        collectors.fetch_github_trending, collectors.fetch_hackernews = orig_gt, orig_hn

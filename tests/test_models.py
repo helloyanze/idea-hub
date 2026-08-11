@@ -131,3 +131,40 @@ def test_create_source_defaults_backward_compatible(conn):
     src = models.list_sources(conn)[-1]
     assert src["items_path"] == "data"
     assert src["title_field"] == "title"
+
+# ---- tags 测试 ----
+
+def test_tags_crud_and_task_tags(conn, target_id):
+    tid = models.create_tag(conn, name="langchain", description="LangChain 框架")
+    assert tid > 0
+    assert models.list_tags(conn)[-1]["name"] == "langchain"
+    models.set_tag_active(conn, tid, False)
+    assert all(t["name"] != "langchain" for t in models.list_tags(conn, active_only=True))
+    task = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
+                              feasibility_score=7, score_breakdown="{}", idea_path="x")
+    models.add_task_tag(conn, task, tid)
+    tags = models.list_task_tags(conn, task)
+    assert tags[0]["name"] == "langchain"
+    models.delete_tag(conn, tid)
+    assert models.list_task_tags(conn, task) == []
+    assert all(t["name"] != "langchain" for t in models.list_tags(conn))
+
+def test_default_tags_seeded(conn):
+    names = {t["name"] for t in models.list_tags(conn)}
+    assert "AI" in names and "Agent" in names
+
+def test_migration_content_types_to_tags(tmp_path):
+    """旧 content_types 表迁移为 tags。"""
+    import sqlite3 as _sqlite3
+    db_path = tmp_path / "old2.db"
+    c = _sqlite3.connect(str(db_path))
+    c.execute("CREATE TABLE content_types (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+              "name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', is_active INTEGER NOT NULL DEFAULT 1)")
+    c.execute("INSERT INTO content_types (name, description) VALUES ('article','文章')")
+    c.commit(); c.close()
+    conn = db.connect(str(db_path))
+    db.init_schema(conn)
+    assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] >= 1
+    names = {r["name"] for r in conn.execute("SELECT name FROM tags").fetchall()}
+    assert "article" in names
+    conn.close()
