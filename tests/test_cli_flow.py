@@ -75,3 +75,37 @@ def test_relate_missing_detail_file_leaves_no_orphan_link(tmp_path):
     assert task["feasibility_score"] == 5  # score untouched
     assert task["status"] == "archived"  # status untouched
     conn.close()
+
+def test_next_complete_fail_cycle(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    models.create_task(conn, title="任务", idea_summary="s", target_id=1, hot_item_id=1,
+                       feasibility_score=7, score_breakdown="{}", idea_path="")
+    models.move_task(conn, 1, "waiting")
+    conn.close()
+    r = _run_cli(["next"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    assert models.get_task(conn, 1)["status"] == "in_progress"
+    conn.close()
+    out = tmp_path / "out.md"; out.write_text("# 产出\n正文", encoding="utf-8")
+    r = _run_cli(["complete", "--task-id", "1", "--summary", "完成摘要",
+                  "--output-path", str(out)], tmp_path)
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    t = models.get_task(conn, 1)
+    assert t["status"] == "done" and t["ai_summary"] == "完成摘要"
+    assert pathlib.Path("outputs/tasks/1/output.md").exists()
+    conn.close()
+
+def test_fail_returns_to_waiting(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    models.create_task(conn, title="任务", idea_summary="s", target_id=1, hot_item_id=1,
+                       feasibility_score=7, score_breakdown="{}", idea_path="")
+    models.move_task(conn, 1, "waiting"); conn.close()
+    _run_cli(["next"], tmp_path)
+    r = _run_cli(["fail", "--task-id", "1", "--reason", "超时"], tmp_path)
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    t = models.get_task(conn, 1)
+    assert t["status"] == "waiting" and "超时" in t["notes"]
+    conn.close()

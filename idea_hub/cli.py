@@ -77,6 +77,53 @@ def cmd_relate(args):
     conn.commit()
     print(new_status)
 
+# ---- Task 5: execution primitives (next / complete / fail) + execute_requests ----
+
+def cmd_next(args):
+    conn = _conn(args)
+    row = conn.execute("SELECT id FROM tasks WHERE status='waiting' ORDER BY updated_at LIMIT 1").fetchone()
+    if not row:
+        print("queue empty"); sys.exit(1)
+    if not models.try_start_task(conn, row["id"]):
+        print("queue empty"); sys.exit(1)
+    task = models.get_task(conn, row["id"])
+    print(json.dumps(task, ensure_ascii=False))
+
+def cmd_complete(args):
+    conn = _conn(args)
+    content = pathlib.Path(args.output_path).read_text(encoding="utf-8")
+    d = pathlib.Path(args.base) / "outputs" / "tasks" / str(args.task_id)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "output.md"
+    p.write_text(content, encoding="utf-8")
+    rel = str(pathlib.Path("outputs") / "tasks" / str(args.task_id) / "output.md").replace("\\", "/")
+    models.update_task(conn, args.task_id, ai_summary=args.summary, output_path=rel)
+    models.move_task(conn, args.task_id, "done")
+    conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
+                 (args.task_id,))
+    conn.commit()
+    print("done")
+
+def cmd_fail(args):
+    conn = _conn(args)
+    task = models.get_task(conn, args.task_id)
+    models.update_task(conn, args.task_id, notes=f"{task['notes']}\n[失败] {args.reason}".strip())
+    models.move_task(conn, args.task_id, "waiting")
+    conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
+                 (args.task_id,))
+    conn.commit()
+    print("waiting")
+
+def cmd_pending_executions(args):
+    conn = _conn(args)
+    for r in conn.execute("SELECT task_id FROM execute_requests WHERE status='pending' ORDER BY id").fetchall():
+        print(r["task_id"])
+
+def cmd_resolve_execution(args):
+    conn = _conn(args)
+    conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=?", (args.task_id,))
+    conn.commit()
+
 def _add_parser(sub, name, help_):
     return sub.add_parser(name, help=help_)
 
@@ -102,6 +149,20 @@ def main():
     pr.add_argument("--dims", required=True)
     pr.add_argument("--detail-path", required=True)
     pr.set_defaults(func=cmd_relate)
+    sub.add_parser("next").set_defaults(func=cmd_next)
+    pc = sub.add_parser("complete")
+    pc.add_argument("--task-id", type=int, required=True)
+    pc.add_argument("--summary", required=True)
+    pc.add_argument("--output-path", required=True)
+    pc.set_defaults(func=cmd_complete)
+    pf = sub.add_parser("fail")
+    pf.add_argument("--task-id", type=int, required=True)
+    pf.add_argument("--reason", required=True)
+    pf.set_defaults(func=cmd_fail)
+    sub.add_parser("pending-executions").set_defaults(func=cmd_pending_executions)
+    prx = sub.add_parser("resolve-execution", add_help=False)
+    prx.add_argument("--task-id", type=int, required=True)
+    prx.set_defaults(func=cmd_resolve_execution)
     args = p.parse_args()
     args.func(args)
 
