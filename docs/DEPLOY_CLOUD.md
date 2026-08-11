@@ -28,6 +28,22 @@
 
 ## 二、上传代码与初始化
 
+> **国内服务器注意**：以下步骤前先在服务器配置国内镜像，否则 GitHub/PyPI 下载会超时：
+> ```bash
+> # git 走 GitHub 加速代理
+> git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
+> git config --global url."https://ghfast.top/https://raw.githubusercontent.com/".insteadOf "https://raw.githubusercontent.com/"
+> # uv 走国内镜像（PyPI + Python 下载）
+> mkdir -p ~/.config/uv && cat > ~/.config/uv/uv.toml <<'EOF'
+> python_install_mirror = "https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download"
+> default-index = "https://pypi.tuna.tsinghua.edu.cn/simple"
+> EOF
+> # Node.js 走 npmmirror（Hermes 安装需要 Node 22，提前装好可跳过 nodejs.org 下载）
+> cd /tmp && curl -fsSL -o node.tar.xz "https://npmmirror.com/mirrors/node/v22.23.2/node-v22.23.2-linux-x64.tar.xz" \
+>   && mkdir -p ~/.local/node && tar -xJf node.tar.xz -C ~/.local/node --strip-components=1 \
+>   && echo 'export PATH=$HOME/.local/node/bin:$PATH' >> ~/.bashrc
+> ```
+
 ```bash
 # 本地执行：上传项目代码（排除 .venv/data/outputs）
 cd /d/Programs/idea-hub
