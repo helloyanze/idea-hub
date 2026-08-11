@@ -80,6 +80,9 @@ body {
 .card-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
 .card-meta { font-size: 12px; color: #6b7280; display: flex; gap: 6px; align-items: center; }
 
+/* ---- 全局：确保 hidden 属性始终生效（防止 display 声明覆盖）---- */
+[hidden] { display: none !important; }
+
 /* ---- score badges ---- */
 .badge {
   display: inline-block;
