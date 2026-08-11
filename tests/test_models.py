@@ -89,3 +89,25 @@ def test_update_task_normal_fields_unaffected(conn, target_id):
         models.update_task(conn, tid, status="waiting")
     models.move_task(conn, tid, "waiting")
     assert models.get_task(conn, tid)["status"] == "waiting"
+
+# ---- Task 2: targets / sources / settings CRUD ----
+
+def test_activate_target_singleton(conn, target_id):
+    t2 = models.create_target(conn, name="开发类", description="d",
+                              score_dimensions='{"技术":1}')
+    models.activate_target(conn, t2)
+    assert models.get_active_target(conn)["id"] == t2
+    models.activate_target(conn, target_id)
+    assert models.get_active_target(conn)["id"] == target_id
+
+def test_source_crud(conn):
+    sid = models.create_source(conn, type="hotlist", name="微博热搜", url="https://x/api")
+    assert models.list_sources(conn, enabled_only=True)[0]["name"] == "微博热搜"
+    models.set_source_enabled(conn, sid, False)
+    assert models.list_sources(conn, enabled_only=True) == []
+    assert len(models.list_sources(conn)) == 1
+
+def test_settings(conn):
+    assert models.get_setting(conn, "threshold") is None
+    models.set_setting(conn, "threshold", "6")
+    assert models.get_setting(conn, "threshold") == "6"

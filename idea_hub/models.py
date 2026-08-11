@@ -61,3 +61,48 @@ def stats(conn, target_id=None):
     for r in conn.execute(sql, args).fetchall():
         out[r["status"]] = r["n"]
     return out
+
+# ---- Task 2: targets / sources / settings CRUD ----
+
+def create_target(conn, *, name, description, score_dimensions):
+    cur = conn.execute("INSERT INTO targets (name, description, score_dimensions) VALUES (?,?,?)",
+                       (name, description, score_dimensions))
+    conn.commit()
+    return cur.lastrowid
+
+def activate_target(conn, target_id):
+    conn.execute("UPDATE targets SET is_active=0")
+    conn.execute("UPDATE targets SET is_active=1 WHERE id=?", (target_id,))
+    conn.commit()
+
+def get_active_target(conn):
+    row = conn.execute("SELECT * FROM targets WHERE is_active=1").fetchone()
+    return dict(row) if row else None
+
+def list_targets(conn):
+    return [dict(r) for r in conn.execute("SELECT * FROM targets ORDER BY id").fetchall()]
+
+def create_source(conn, *, type, name, url, enabled=True):
+    cur = conn.execute("INSERT INTO sources (type, name, url, enabled) VALUES (?,?,?,?)",
+                       (type, name, url, 1 if enabled else 0))
+    conn.commit()
+    return cur.lastrowid
+
+def list_sources(conn, enabled_only=False):
+    sql = "SELECT * FROM sources"
+    if enabled_only: sql += " WHERE enabled=1"
+    sql += " ORDER BY id"
+    return [dict(r) for r in conn.execute(sql).fetchall()]
+
+def set_source_enabled(conn, source_id, enabled):
+    conn.execute("UPDATE sources SET enabled=? WHERE id=?", (1 if enabled else 0, source_id))
+    conn.commit()
+
+def get_setting(conn, key, default=None):
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+def set_setting(conn, key, value):
+    conn.execute("INSERT INTO settings (key, value) VALUES (?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    conn.commit()
