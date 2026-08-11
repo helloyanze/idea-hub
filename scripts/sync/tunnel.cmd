@@ -10,6 +10,7 @@ if "%PORT%"=="" set PORT=22
 
 echo 正在建立 SSH 隧道 %USER%@%SERVER% ... 
 echo 隧道建立后请打开浏览器访问 http://127.0.0.1:8000
-echo 按 Ctrl+C 关闭隧道
+echo 保持此窗口开启；按 Ctrl+C 关闭隧道
+echo 若连接断开，重新双击本脚本即可
 
-ssh -N -L 8000:127.0.0.1:8000 -p %PORT% %USER%@%SERVER%
+ssh -N -L 8000:127.0.0.1:8000 -p %PORT% -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o ExitOnForwardFailure=yes %USER%@%SERVER%
