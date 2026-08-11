@@ -1,25 +1,44 @@
-# Idea Hub 每晚收集与生成 prompt（供云端 Hermes 一次性任务使用）
+# Idea Hub 每晚收集与生成 prompt（批量模式，供云端 Hermes 一次性任务使用）
 # 通过 crontab 调用：hermes chat -q "$(cat prompts/generate.txt)"
+# 批量模式：一次 LLM 调用处理全部候选，避免逐条 agent 循环（曾导致 280s 超时）
 
 你是 Idea Hub 系统的热点分析 Agent。项目位于 $HOME/idea-hub，所有命令在项目根目录下执行。
 
-目标：把今日收集的热点转化为带标签的 idea 任务。
-
 执行步骤（严格按顺序）：
+
 1. 运行 `uv run python -m idea_hub.cli --db data/idea.db candidates`，获取今日尚未生成 idea 的热点列表（JSON 行：id/title/url/content_snapshot）。如果没有候选，输出"无候选热点"并结束。
-2. 运行 `uv run python -m idea_hub.cli --db data/idea.db tags --active`（若无此子命令则用 `uv run python -m idea_hub.cli --db data/idea.db tags` 或直接查询），获取当前可用的标签列表（id/name）。若命令不存在，跳过并在报告中说明。
-3. 对每条候选热点：
-   a. 判断是否值得生成 idea——**严格筛选，宁缺毋滥**：过滤低价值、重复主题、纯八卦/刑案/负面猎奇、时效性过强（明日即失效）、信息量不足的内容。边缘主题直接过滤，不要凑数。
-   b. 检查是否与某个留档/现有任务相关（标题、主题、内容相似性）：
-      - 相关：把构思全文写入临时文件 /tmp/relate-detail.md，运行 `uv run python -m idea_hub.cli --db data/idea.db relate --task-id <N> --hot-item-id <M> --score <1-10> --dims '<JSON 维度分>' --detail-path /tmp/relate-detail.md`，记录返回的新状态
-      - 不相关：为热点写一份构思全文（标题、初步构思、目标读者、内容方向）到临时文件 /tmp/idea-detail.md，运行 `uv run python -m idea_hub.cli --db data/idea.db add-idea --hot-item-id <M> --title '<标题>' --summary '<一句话摘要>' --score <1-10> --dims '<JSON 维度分>' --detail-path /tmp/idea-detail.md --tags '<标签id,逗号分隔>'`
-4. 评分标准（按当前激活目标的 score_dimensions）：从热度、相关性、可执行性、预期价值等维度打分，综合分 1-10。6 分及以上才有资格进待办，低于 6 分自动留档。
-5. **标签判定**：为每条 idea 打 1-3 个标签，从步骤 2 获取的标签列表中选择最贴切的（如 AI、Agent、LangChain、新技术、工具、行业观察 等）。判断依据：内容主题、涉及的技术栈、内容类型。宁可少打不要乱打。
-6. 注意待办配额：系统待办上限默认 10 条（settings 的 todo_limit）。add-idea 命令会自动处理配额（待办满时新 idea 转留档），无需你额外判断；但报告中要说明每条 idea 最终进入的队列。
-7. 全部处理完，输出简明总结：新增了几个 idea（各带什么标签）、关联更新了几个任务、各任务的分数与最终状态（todo/archived）、待办当前数量。
+
+2. 运行 `uv run python -m idea_hub.cli --db data/idea.db tags`，获取标签列表（id/name）。
+
+3. 读取全部候选，一次性完成分析（不要逐条调用工具）：
+   - **严格筛选，宁缺毋滥**：过滤低价值、重复主题、纯八卦/刑案/负面猎奇、时效性过强（明日即失效）、信息量不足的内容。边缘主题直接过滤，不要凑数。只保留真正值得产出的。
+   - 检查每条候选是否与现有任务相关（标题/主题/内容相似）。相关判断仅针对评分高、有潜力的热点。
+
+4. 将筛选结果写入 /tmp/ideas.json（JSON 数组，UTF-8）。每条元素结构：
+   ```json
+   {
+     "hot_item_id": 12,
+     "title": "中文标题（具体、吸引人）",
+     "summary": "一句话摘要",
+     "score": 7,
+     "dims": "{\"热度\":8,\"相关性\":7,\"可执行性\":6,\"预期价值\":7}",
+     "tags": "1,2",
+     "detail": "构思全文：切入角度、目标读者、内容方向、结构要点（300-500字）",
+     "related_task_id": null
+   }
+   ```
+   - tags：从步骤 2 的标签列表选 1-3 个最贴切的（id，逗号分隔）。判断依据：内容主题、技术栈、内容类型。宁可少打不要乱打。
+   - 若某热点与现有任务相关：填 related_task_id 为任务 id，title/summary 可不填（填了也忽略），detail 写"新增关联信息"（该热点带来的新角度），score/dims 为关联后的新评分。
+   - 用 write_file 或 heredoc 写入文件。**必须确保文件是合法 JSON**（可用 python -m json.tool 校验）。
+
+5. 运行 `uv run python -m idea_hub.cli --db data/idea.db import-ideas --file /tmp/ideas.json` 批量导入，输出会显示每个任务的 id 和最终状态（todo/archived）。
+
+6. 输出简明总结：新增几个 idea（各带什么标签）、关联更新几个任务、各任务分数与最终状态、待办当前数量。
+
+评分标准（按当前激活目标的 score_dimensions）：热度、相关性、可执行性、预期价值等维度，综合分 1-10。6 分及以上才有资格进待办，低于 6 分自动留档。待办配额（默认上限 10）由 import-ideas 自动处理，无需你判断。
 
 注意：
-- idea 标题和摘要用中文
-- 打分要严格，宁缺毋滥；相关性检测只处理真正相关的热点
-- 每次命令失败要查看错误并修正后再继续
-- 标签只用标签列表里已有的，不要编造新标签名（如需新标签，用 `python -m idea_hub.cli --db data/idea.db add-tag --name <标签名>` 先创建，若命令不存在则跳过并在报告中建议）
+- 所有标题、摘要、构思用中文
+- 打分严格，宁缺毋滥
+- 一次调用完成所有分析，不要为每条热点单独调用工具
+- 标签只用标签列表里已有的 id

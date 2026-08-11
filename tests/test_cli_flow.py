@@ -203,3 +203,51 @@ def test_add_idea_with_tags(tmp_path):
     tags = conn.execute("SELECT t.name FROM task_tags tt JOIN tags t ON t.id=tt.tag_id").fetchall()
     assert tags[0]["name"] == "agent"
     conn.close()
+
+def test_import_ideas_batch(tmp_path):
+    """批量导入：新 idea + 关联更新 + 配额 + 标签。"""
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    tag1 = models.create_tag(conn, name="ai")
+    models.set_setting(conn, "todo_limit", "2")
+    t1 = models.create_task(conn, title="已有任务", idea_summary="s", target_id=1,
+                            feasibility_score=5, score_breakdown="{}", idea_path="")
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点A', 'http://a')")
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点B', 'http://b')")
+    conn.commit(); conn.close()
+    ideas = [
+        {"hot_item_id": 2, "title": "新idea", "summary": "新", "score": 7,
+         "dims": "{}", "tags": str(tag1),
+         "detail": "构思全文内容\n第二行"},
+        {"hot_item_id": 3, "related_task_id": t1, "score": 7, "dims": "{}",
+         "detail": "新角度"},
+    ]
+    f = tmp_path / "ideas.json"; f.write_text(json.dumps(ideas, ensure_ascii=False), encoding="utf-8")
+    r = _run_cli(["import-ideas", "--file", str(f)], tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert len(out) == 2
+    new_task = out[0]
+    assert new_task["relate"] is False and new_task["status"] == "todo"
+    # 关联更新：已有任务分数 5→7 且 archived→todo（配额 2 允许）
+    relate_task = out[1]
+    assert relate_task["relate"] is True and relate_task["status"] == "todo"
+    conn = db.connect(str(tmp_path / "t.db"))
+    t2 = models.get_task(conn, t1)
+    assert t2["feasibility_score"] == 7 and t2["status"] == "todo"
+    tags = models.list_task_tags(conn, new_task["task_id"])
+    assert tags[0]["name"] == "ai"
+    assert models.get_task(conn, new_task["task_id"])["idea_path"] != ""
+    conn.close()
+
+def test_import_ideas_fenced_json(tmp_path):
+    """容错：文件内容是 markdown 代码块包裹的 JSON 也能解析。"""
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点C', 'http://c')")
+    conn.commit(); conn.close()
+    f = tmp_path / "ideas.md"
+    f.write_text('```json\n[{"hot_item_id": 2, "title": "块内idea", "summary": "s", '
+                 '"score": 6, "dims": "{}", "tags": "", "detail": "内容"}]\n```\n', encoding="utf-8")
+    r = _run_cli(["import-ideas", "--file", str(f)], tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out[0]["status"] == "todo"

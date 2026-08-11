@@ -42,14 +42,82 @@ def _todo_quota_ok(conn):
     count = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='todo'").fetchone()[0]
     return count < limit
 
+def cmd_import_ideas(args):
+    """批量导入 idea（JSON 数组，每晚一次 LLM 调用生成）：
+    每条含 hot_item_id/title/summary/score/dims/tags/detail；
+    related_task_id 存在时走 relate 逻辑（更新已有任务+重评分+配额内自动移列）。"""
+    conn = _conn(args)
+    raw = pathlib.Path(args.file).read_text(encoding="utf-8")
+    data = None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        import re as _re
+        m = _re.search(r"```(?:json)?\s*(.*?)\s*```", raw, _re.S)
+        if m:
+            data = json.loads(m.group(1))
+    if not isinstance(data, list):
+        print("error: JSON 顶层必须是数组", file=sys.stderr)
+        sys.exit(1)
+    results = []
+    for item in data:
+        try:
+            if item.get("related_task_id"):
+                task = models.get_task(conn, item["related_task_id"])
+                if task is None:
+                    results.append({"hot_item_id": item.get("hot_item_id"), "error": "related task not found"})
+                    continue
+                addition = f"## 新增关联信息\n{item.get('addition', item.get('detail', ''))}"
+                content = ""
+                if task["idea_path"]:
+                    p = pathlib.Path(task["idea_path"])
+                    if p.exists():
+                        content = p.read_text(encoding="utf-8")
+                if item.get("hot_item_id") and not _link_exists(conn, task["id"], item["hot_item_id"]):
+                    conn.execute("INSERT INTO task_links (task_id, hot_item_id) VALUES (?,?)",
+                                 (task["id"], item["hot_item_id"]))
+                models.update_task(conn, task["id"], feasibility_score=item["score"],
+                                   score_breakdown=item["dims"],
+                                   idea_path=_write_draft(args.base, task["id"], content + "\n\n" + addition))
+                task2 = models.get_task(conn, task["id"])
+                if task2["feasibility_score"] >= models.SCORE_THRESHOLD and task2["status"] == "archived":
+                    if _todo_quota_ok(conn):
+                        models.move_task(conn, task["id"], "todo")
+                results.append({"task_id": task["id"],
+                                "status": models.get_task(conn, task["id"])["status"], "relate": True})
+            else:
+                quota_full = not _todo_quota_ok(conn)  # 创建前检查
+                tid = models.create_task(conn, title=item["title"], idea_summary=item["summary"],
+                                         target_id=models.get_active_target(conn)["id"],
+                                         hot_item_id=item.get("hot_item_id"),
+                                         feasibility_score=item["score"],
+                                         score_breakdown=item["dims"], idea_path="")
+                if quota_full:
+                    models.move_task(conn, tid, "archived")
+                for tag_id in str(item.get("tags", "")).split(","):
+                    tag_id = tag_id.strip()
+                    if tag_id.isdigit():
+                        models.add_task_tag(conn, tid, int(tag_id))
+                models.update_task(conn, tid, idea_path=_write_draft(args.base, tid, item["detail"]))
+                if item.get("hot_item_id"):
+                    conn.execute("INSERT OR IGNORE INTO task_links (task_id, hot_item_id) VALUES (?,?)",
+                                 (tid, item["hot_item_id"]))
+                results.append({"task_id": tid,
+                                "status": models.get_task(conn, tid)["status"], "relate": False})
+            conn.commit()
+        except Exception as exc:
+            results.append({"error": str(exc)})
+    print(json.dumps(results, ensure_ascii=False, indent=1))
+
 def cmd_add_idea(args):
     conn = _conn(args)
     content = pathlib.Path(args.detail_path).read_text(encoding="utf-8")
+    quota_full = not _todo_quota_ok(conn)  # 创建前检查（不含新任务）
     tid = models.create_task(conn, title=args.title, idea_summary=args.summary,
                              target_id=models.get_active_target(conn)["id"],
                              hot_item_id=args.hot_item_id, feasibility_score=args.score,
                              score_breakdown=args.dims, idea_path="")
-    if models.get_task(conn, tid)["status"] == "todo" and not _todo_quota_ok(conn):
+    if quota_full:
         models.move_task(conn, tid, "archived")
     for tag_id in (args.tags or "").split(","):
         tag_id = tag_id.strip()
@@ -181,6 +249,9 @@ def main():
     pa.add_argument("--detail-path", required=True)
     pa.add_argument("--tags", default="", help="标签 id 列表，逗号分隔（如 1,2,3）")
     pa.set_defaults(func=cmd_add_idea)
+    pi = sub.add_parser("import-ideas")
+    pi.add_argument("--file", required=True, help="idea JSON 文件路径（数组）")
+    pi.set_defaults(func=cmd_import_ideas)
     pr = sub.add_parser("relate")
     pr.add_argument("--task-id", type=int, required=True)
     pr.add_argument("--hot-item-id", type=int, required=True)
