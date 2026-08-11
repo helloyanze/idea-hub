@@ -2,8 +2,11 @@
 # mihomo 代理自启
 @reboot nohup $HOME/.config/mihomo/mihomo -d $HOME/.config/mihomo -f sub.yaml > $HOME/.config/mihomo/mihomo.log 2>&1 &
 
-# Idea Hub Web 服务自启
-@reboot cd $HOME/idea-hub && nohup .venv/bin/uvicorn idea_hub.server:app --host 127.0.0.1 --port 8000 > logs/server.log 2>&1 &
+# Idea Hub Web 服务自启（加载 .env 认证变量）
+@reboot cd $HOME/idea-hub && bash -c 'set -a; source .env; set +a; nohup .venv/bin/uvicorn idea_hub.server:app --host 127.0.0.1 --port 8000 > logs/server.log 2>&1 &'
+
+# Cloudflare Tunnel 自启（公网访问 idea.example.com）
+@reboot export PATH=$HOME/.local/bin:$PATH; nohup cloudflared tunnel --config $HOME/.cloudflared/config.yml run idea-hub > $HOME/.cloudflared/tunnel.log 2>&1 &
 
 # 每晚 02:00 收集热点并生成 idea（auto_run=0 时跳过）
 0 2 * * * cd $HOME/idea-hub && .venv/bin/python -c "from idea_hub import db,models; import sys; c=db.connect('data/idea.db'); sys.exit(0 if models.get_setting(c,'auto_run','1')=='1' else 1)" >/dev/null 2>&1 && export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 && $HOME/.local/bin/uv run python -m idea_hub.cli --db data/idea.db collect >> logs/collect.log 2>&1 && $HOME/.local/bin/hermes chat -q "$(cat $HOME/idea-hub/prompts/generate.txt)" >> logs/generate.log 2>&1 || echo "auto_run 暂停或收集失败，跳过 $(date)" >> logs/auto-run.log
