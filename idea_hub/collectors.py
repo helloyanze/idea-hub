@@ -31,6 +31,8 @@ def fetch_hotlist(url, items_path="data", session=None):
 
 def fetch_rss(url):
     feed = feedparser.parse(url)
+    if feed.bozo:
+        raise RuntimeError(f"feed parse failed: {feed.get('bozo_exception')}")
     out = []
     for e in feed.entries:
         out.append({"title": getattr(e, "title", "").strip(),
