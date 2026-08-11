@@ -33,6 +33,8 @@ def update_task(conn, task_id, **fields):
     sets, args = [], []
     for k, v in fields.items():
         if k not in allowed: raise KeyError(f"unknown field {k}")
+        if k == "status" and v not in STATUSES:
+            raise ValueError(f"bad status {v}")
         sets.append(f"{k}=?"); args.append(v)
     if not sets: return
     args.append(task_id)

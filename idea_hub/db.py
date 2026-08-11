@@ -1,4 +1,4 @@
-import sqlite3, pathlib, shutil
+import sqlite3, pathlib
 from datetime import datetime
 
 SCHEMA = """
@@ -71,9 +71,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 def backup_db(conn: sqlite3.Connection, backups_dir: str) -> str:
     pathlib.Path(backups_dir).mkdir(parents=True, exist_ok=True)
-    db_path = pathlib.Path(conn.execute("PRAGMA database_list").fetchone()["file"])
     dest = pathlib.Path(backups_dir) / f"idea-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
-    shutil.copy2(db_path, dest)
+    # 用 sqlite3 内建备份 API：WAL 模式下会一并读取 -wal 中未 checkpoint 的帧，
+    # 而 shutil.copy2 直接复制主库文件只能得到"截至上次 checkpoint"的过期快照（静默丢失最近提交）。
+    # 注：Python 3.11 的 backup() target 只接受 sqlite3.Connection，需先打开目标连接。
+    with sqlite3.connect(str(dest)) as bconn:
+        conn.backup(bconn)
     copies = sorted(pathlib.Path(backups_dir).glob("idea-*.db"), reverse=True)
     for old in copies[7:]:
         old.unlink()

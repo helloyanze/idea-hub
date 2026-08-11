@@ -1,3 +1,4 @@
+import pathlib, sqlite3
 import pytest
 from idea_hub import db, models
 
@@ -32,3 +33,52 @@ def test_stats_counts(conn, target_id):
                        feasibility_score=4, score_breakdown="{}", idea_path="x")
     st = models.stats(conn)
     assert st["todo"] == 1 and st["archived"] == 1
+
+# ---- backup_db（Finding 1：WAL 安全备份 + 剪枝） ----
+
+def test_backup_db_includes_recent_commits(conn, target_id, tmp_path):
+    """WAL 模式下备份必须包含未 checkpoint 的最近提交（回归：shutil.copy2 会静默丢失）。"""
+    tid = models.create_task(conn, title="备份完整性", idea_summary="s", target_id=target_id,
+                             feasibility_score=7, score_breakdown="{}", idea_path="x")
+    dest = db.backup_db(conn, str(tmp_path / "backups"))
+    assert pathlib.Path(dest).exists()
+    bconn = sqlite3.connect(dest)
+    try:
+        row = bconn.execute("SELECT title, status FROM tasks WHERE id=?", (tid,)).fetchone()
+        assert row is not None
+        assert row[0] == "备份完整性" and row[1] == "todo"
+    finally:
+        bconn.close()
+
+
+def test_backup_db_prunes_to_seven(conn, target_id, tmp_path):
+    backups_dir = str(tmp_path / "backups")
+    db.backup_db(conn, backups_dir)
+    for i in range(9):  # 塞入 9 份过期备份（文件名各不相同，避免同秒覆盖）
+        pathlib.Path(backups_dir, f"idea-20260101-{i:06d}.db").touch()
+    dest = db.backup_db(conn, backups_dir)  # 触发剪枝
+    remaining = sorted(pathlib.Path(backups_dir).glob("idea-*.db"))
+    assert len(remaining) == 7
+    assert pathlib.Path(dest) in remaining  # 最新备份被保留
+
+# ---- update_task（Finding 2：status 值校验） ----
+
+def test_update_task_rejects_invalid_status(conn, target_id):
+    tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
+                             feasibility_score=7, score_breakdown="{}", idea_path="x")
+    with pytest.raises(ValueError):
+        models.update_task(conn, tid, status="done!!")
+    # 非法值未落库，stats() 不会因 KeyError 崩溃
+    assert models.get_task(conn, tid)["status"] == "todo"
+    assert models.stats(conn)["todo"] == 1
+
+
+def test_update_task_normal_fields_unaffected(conn, target_id):
+    tid = models.create_task(conn, title="t", idea_summary="s", target_id=target_id,
+                             feasibility_score=7, score_breakdown="{}", idea_path="x")
+    models.update_task(conn, tid, notes="reviewed", title="新标题")
+    task = models.get_task(conn, tid)
+    assert task["notes"] == "reviewed" and task["title"] == "新标题" and task["status"] == "todo"
+    # 合法 status 值仍可通过 update_task 更新
+    models.update_task(conn, tid, status="waiting")
+    assert models.get_task(conn, tid)["status"] == "waiting"
