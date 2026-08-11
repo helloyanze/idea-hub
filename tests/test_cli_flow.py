@@ -43,3 +43,35 @@ def test_relate_rescores_archived_to_todo(tmp_path):
     links = conn.execute("SELECT hot_item_id FROM task_links WHERE task_id=1").fetchall()
     assert {l["hot_item_id"] for l in links} == {1, 2}
     conn.close()
+
+def test_relate_missing_task_fails_without_side_effects(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点Y', 'http://y')")
+    conn.commit(); conn.close()
+    draft = tmp_path / "draft.md"; draft.write_text("补充", encoding="utf-8")
+    r = _run_cli(["relate", "--task-id", "999", "--hot-item-id", "2",
+                  "--score", "7", "--dims", "{}", "--detail-path", str(draft)], tmp_path)
+    assert r.returncode == 1, r.stderr
+    assert "999" in r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    assert conn.execute("SELECT COUNT(*) FROM task_links").fetchone()[0] == 0
+    conn.close()
+
+def test_relate_missing_detail_file_leaves_no_orphan_link(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db")); db.init_schema(conn); _seed(conn)
+    models.create_task(conn, title="旧想法", idea_summary="s", target_id=1,
+                       hot_item_id=1, feasibility_score=5, score_breakdown="{}",
+                       idea_path="outputs/tasks/1/idea.md")  # archived
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, '热点Y', 'http://y')")
+    conn.commit(); conn.close()
+    r = _run_cli(["relate", "--task-id", "1", "--hot-item-id", "2",
+                  "--score", "7", "--dims", '{"热度":9}',
+                  "--detail-path", str(tmp_path / "missing.md")], tmp_path)
+    assert r.returncode != 0  # FileNotFoundError propagates, no writes happened
+    conn = db.connect(str(tmp_path / "t.db"))
+    links = conn.execute("SELECT hot_item_id FROM task_links WHERE task_id=1").fetchall()
+    assert {l["hot_item_id"] for l in links} == {1}  # no orphan link to hot item 2
+    task = models.get_task(conn, 1)
+    assert task["feasibility_score"] == 5  # score untouched
+    assert task["status"] == "archived"  # status untouched
+    conn.close()

@@ -51,17 +51,22 @@ def cmd_add_idea(args):
 
 def cmd_relate(args):
     conn = _conn(args)
-    if not _link_exists(conn, args.task_id, args.hot_item_id):
-        conn.execute("INSERT INTO task_links (task_id, hot_item_id) VALUES (?,?)",
-                     (args.task_id, args.hot_item_id))
-        conn.commit()
     task = models.get_task(conn, args.task_id)
+    if task is None:
+        print(f"error: task {args.task_id} not found", file=sys.stderr)
+        sys.exit(1)
+    # Read-only phase first: any failure here exits before a single write.
+    addition = pathlib.Path(args.detail_path).read_text(encoding="utf-8")
     content = ""
     if task["idea_path"]:
         p = pathlib.Path(task["idea_path"])
         if p.exists():
             content = p.read_text(encoding="utf-8")
-    addition = pathlib.Path(args.detail_path).read_text(encoding="utf-8")
+    # Write phase: task_links INSERT is no longer committed on its own;
+    # everything lands in one commit at the end.
+    if not _link_exists(conn, args.task_id, args.hot_item_id):
+        conn.execute("INSERT INTO task_links (task_id, hot_item_id) VALUES (?,?)",
+                     (args.task_id, args.hot_item_id))
     models.update_task(conn, args.task_id, feasibility_score=args.score,
                        score_breakdown=args.dims,
                        idea_path=_write_draft(args.base, args.task_id, content + "\n\n## 新增关联信息\n" + addition))
@@ -69,6 +74,7 @@ def cmd_relate(args):
     new_status = task["status"]
     if task["feasibility_score"] >= models.SCORE_THRESHOLD and task["status"] == "archived":
         models.move_task(conn, args.task_id, "todo"); new_status = "todo"
+    conn.commit()
     print(new_status)
 
 def _add_parser(sub, name, help_):
