@@ -168,3 +168,25 @@ def test_migration_content_types_to_tags(tmp_path):
     names = {r["name"] for r in conn.execute("SELECT name FROM tags").fetchall()}
     assert "article" in names
     conn.close()
+
+def test_migration_rebuild_preserves_fk(conn, tmp_path):
+    """sources 表重建后 hot_items 外键必须指向新 sources 表（回归：RENAME 悬空引用）。"""
+    import sqlite3 as _sqlite3
+    db_path = tmp_path / "fk.db"
+    c = _sqlite3.connect(str(db_path))
+    c.execute("CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+              "type TEXT NOT NULL CHECK (type IN ('hotlist','rss')), name TEXT NOT NULL, "
+              "url TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1)")
+    c.execute("CREATE TABLE hot_items (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+              "source_id INTEGER NOT NULL REFERENCES sources(id), title TEXT NOT NULL, "
+              "url TEXT NOT NULL, content_snapshot TEXT NOT NULL DEFAULT '', "
+              "collected_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    c.execute("INSERT INTO sources (type, name, url) VALUES ('rss','旧源','http://x')")
+    c.commit(); c.close()
+    conn = db.connect(str(db_path))
+    db.init_schema(conn)  # 触发重建
+    # 外键完好：插入 hot_item 引用 sources 正常
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (1, 'T', 'http://t')")
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM hot_items").fetchone()[0] == 1
+    conn.close()

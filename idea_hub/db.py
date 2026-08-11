@@ -99,6 +99,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'").fetchone()
     if sql and "github-trending" not in (sql[0] or ""):
         conn.execute("PRAGMA foreign_keys=OFF")
+        # legacy_alter_table=ON：RENAME 时不重写其他表对 sources 的外键引用，
+        # 否则 hot_items.source_id 会被改写为 sources_old 导致悬空引用
+        conn.execute("PRAGMA legacy_alter_table=ON")
         conn.execute("ALTER TABLE sources RENAME TO sources_old")
         conn.execute("""CREATE TABLE sources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,6 +117,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                         SELECT id, type, name, url, enabled, items_path, title_field, IFNULL(keywords, '')
                         FROM sources_old""")
         conn.execute("DROP TABLE sources_old")
+        conn.execute("PRAGMA legacy_alter_table=OFF")
         conn.execute("PRAGMA foreign_keys=ON")
     # tasks.content_type 旧列（content_types 方案残留）——若存在则删除
     tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
