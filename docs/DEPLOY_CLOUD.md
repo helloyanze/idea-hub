@@ -61,13 +61,17 @@ ssh ubuntu@<服务器IP> "cd $HOME/idea-hub && bash scripts/deploy/install-serve
 ssh ubuntu@<服务器IP>
 cd $HOME/idea-hub
 hermes setup        # 交互式选择 provider（如 DeepSeek）并填入 API key
-# 或非交互：
+# 或非交互（注意：必须同时设置 default、base_url，否则可能误走 OpenRouter）：
 hermes config set model.provider deepseek
+hermes config set model.default deepseek-chat
 hermes config set model.model deepseek-chat
-# 在 ~/.hermes/.env 写入 DEEPSEEK_API_KEY=sk-xxx
+hermes config set model.base_url https://api.deepseek.com
+# 在 ~/.hermes/.env 写入 DEEPSEEK_API_KEY=sk-xxx（chmod 600）
 ```
 
-验证：`hermes chat -q "你好"`
+验证：`hermes chat -q "回复数字 42 即可"` —— 应看到回复 "42"。
+若报 `HTTP 401 Missing Authentication header` 且 Endpoint 是 openrouter.ai：说明 `model.default`/`base_url` 配置错误（见上方四行配置），
+必须显式设置 `model.default=deepseek-chat` 和 `model.base_url=https://api.deepseek.com`。
 
 ## 四、初始化数据（服务器上执行一次）
 
@@ -84,6 +88,10 @@ curl -s -X POST http://127.0.0.1:8000/api/targets/1/activate
 curl -s -X POST http://127.0.0.1:8000/api/sources \
     -H "Content-Type: application/json" \
     -d '{"type":"hotlist","name":"示例热榜","url":"https://api.example.com/hot"}'
+# 百度热搜（实测可用，需自定义 items_path/title_field）：
+curl -s -X POST http://127.0.0.1:8000/api/sources \
+    -H "Content-Type: application/json" \
+    -d '{"type":"hotlist","name":"百度热搜","url":"https://top.baidu.com/api/board?platform=wise&tab=realtime","items_path":"data.cards.0.content.0.content","title_field":"word"}'
 # 添加 RSS 来源
 curl -s -X POST http://127.0.0.1:8000/api/sources \
     -H "Content-Type: application/json" \
