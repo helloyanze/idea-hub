@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# Idea Hub 云端初始化脚本（在云服务器上以 root 或 sudo 执行）
-# 用法: bash install-server.sh $HOME/idea-hub
+# Idea Hub 云端初始化脚本（用户级部署，免 sudo）
+# 用法: bash install-server.sh [应用目录，默认 ~/idea-hub]
 set -euo pipefail
 
 APP_DIR="${1:-$HOME/idea-hub}"
-echo "==> 安装系统依赖 (Python 3.11+, uv, git)"
+echo "==> 应用目录: $APP_DIR"
 
-# Debian/Ubuntu
-if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y python3 python3-venv python3-pip git curl
-fi
-# CentOS/RHEL
-if command -v yum >/dev/null 2>&1; then
-    yum install -y python3 python3-pip git curl
-fi
+echo "==> 检查系统依赖 (python3/curl/git)"
+for cmd in python3 curl git; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        echo "    $cmd: $(command -v $cmd)"
+    else
+        echo "    $cmd: 缺失！请先安装（如 Ubuntu: sudo apt-get install -y $cmd）"
+        exit 1
+    fi
+done
 
-echo "==> 安装 uv"
-curl -LsSf https://astral.sh/uv/install.sh | sh
+echo "==> 安装 uv（用户级）"
+if ! command -v uv >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uv" ]; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
 export PATH="$HOME/.local/bin:$PATH"
+uv --version
 
-echo "==> 准备应用目录 $APP_DIR"
+echo "==> 准备应用目录"
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
 
@@ -32,17 +34,18 @@ fi
 uv pip install --python .venv/bin/python -r requirements.txt
 
 echo "==> 创建运行时目录"
-mkdir -p data outputs backups
+mkdir -p data outputs backups logs prompts
+cp -n scripts/deploy/prompts/*.txt prompts/ 2>/dev/null || true
 
-echo "==> 安装 Hermes Agent"
-if ! command -v hermes >/dev/null 2>&1; then
+echo "==> 安装 Hermes Agent（用户级）"
+if ! command -v hermes >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/hermes" ]; then
     curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 fi
 export PATH="$HOME/.local/bin:$PATH"
-hermes --version || true
+hermes --version 2>/dev/null || echo "    (hermes 已安装或需手动 hermes setup)"
 
 echo "==> 完成"
-echo "下一步（手动执行）:"
-echo "  1. hermes setup  # 配置 LLM provider 和 API key"
-echo "  2. 配置 sources 表: uv run python -m idea_hub.cli --db data/idea.db 相关命令"
-echo "  3. 安装 systemd 服务与 crontab: 参考 docs/DEPLOY_CLOUD.md"
+echo "下一步:"
+echo "  1. hermes setup 配置 LLM provider 和 API key"
+echo "  2. crontab -l > /tmp/cron.bak && cat scripts/deploy/crontab.txt >> /tmp/cron.bak && crontab /tmp/cron.bak"
+echo "  3. 参考 docs/DEPLOY_CLOUD.md 完成初始化"
