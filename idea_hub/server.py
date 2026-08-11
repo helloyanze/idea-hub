@@ -132,6 +132,15 @@ def create_app(db_path: str) -> FastAPI:
             c.commit()
             return {"ok": True}
 
+    @app.post("/api/collect")
+    def collect_now():
+        """立即收集（含评分分流）。"""
+        from . import collectors
+        with conn() as c:
+            res = collectors.collect_all(c)
+        return {"collected": res["collected"], "discarded": res["discarded"],
+                "review": res["review"], "errors": res["errors"]}
+
     @app.get("/api/targets")
     def list_targets():
         with conn() as c:
