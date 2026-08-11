@@ -53,7 +53,7 @@ def test_collect_all_dedupes(conn, tmp_path):
                         {"title": "T2", "url": "http://u2"}]}
     # monkeypatch: use fake session for any url
     orig = collectors.fetch_hotlist
-    collectors.fetch_hotlist = lambda url, items_path="data", session=None: orig(url, items_path=items_path, session=FakeSession(payload))
+    collectors.fetch_hotlist = lambda url, items_path="data", title_field="title", session=None: orig(url, items_path=items_path, title_field=title_field, session=FakeSession(payload))
     try:
         res = collectors.collect_all(conn)
         assert res["collected"] == 2
@@ -87,3 +87,46 @@ def test_collect_all_error_isolation(conn, rss_url):
     assert res["collected"] == 2
     rows = conn.execute("SELECT title, url FROM hot_items WHERE source_id=?", (good,)).fetchall()
     assert {r["title"] for r in rows} == {"R1", "R2"}
+
+def test_fetch_hotlist_custom_title_field(tmp_path):
+    """自定义 title_field：适配不同热榜 API 的字段命名。"""
+    payload = {"result": {"list": [{"word": "热搜词", "url": "http://w", "hot": 55}]}}
+    items = collectors.fetch_hotlist("http://x", items_path="result.list",
+                                     title_field="word", session=FakeSession(payload))
+    assert items[0]["title"] == "热搜词"
+    assert items[0]["content_snapshot"] == "热度:55"
+
+def test_collect_all_uses_source_config(conn, tmp_path):
+    """collect_all 使用来源配置的 items_path/title_field。"""
+    sid = models.create_source(conn, type="hotlist", name="百度热榜",
+                               url="http://x", items_path="data.cards.0.content.0.content",
+                               title_field="word")
+    payload = {"data": {"cards": [{"content": [{"content": [
+        {"word": "热词A", "url": "http://a", "hot": 9},
+        {"word": "热词B", "url": "http://b"},
+    ]}]}]}}
+    orig = collectors.fetch_hotlist
+    collectors.fetch_hotlist = lambda url, items_path="data", title_field="title", session=None: \
+        orig(url, items_path=items_path, title_field=title_field, session=FakeSession(payload))
+    try:
+        res = collectors.collect_all(conn)
+        assert res["collected"] == 2
+        assert res["errors"] == []
+    finally:
+        collectors.fetch_hotlist = orig
+
+def test_migration_adds_columns(tmp_path):
+    """老库迁移：缺少 items_path/title_field 列时自动补充。"""
+    import sqlite3 as _sqlite3
+    db_path = tmp_path / "old.db"
+    c = _sqlite3.connect(str(db_path))
+    c.execute("CREATE TABLE sources (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+              "type TEXT NOT NULL, name TEXT NOT NULL, url TEXT NOT NULL, "
+              "enabled INTEGER NOT NULL DEFAULT 1)")
+    c.execute("INSERT INTO sources (type, name, url) VALUES ('rss','旧源','http://x')")
+    c.commit(); c.close()
+    conn = db.connect(str(db_path))
+    db.init_schema(conn)
+    row = conn.execute("SELECT * FROM sources").fetchone()
+    assert row["items_path"] == "data" and row["title_field"] == "title"
+    conn.close()

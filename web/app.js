@@ -124,6 +124,8 @@ async function loadSources() {
       <input id="src-type" value="hotlist" placeholder="类型(hotlist/rss)">
       <input id="src-name" placeholder="名称">
       <input id="src-url" placeholder="URL">
+      <input id="src-items-path" placeholder="条目路径(默认 data)">
+      <input id="src-title-field" placeholder="标题字段(默认 title)">
       <button onclick="addSource()">添加</button>
     </div>` +
     d.items.map(s => `<div class="src-row">${escapeHtml(s.name)} (${escapeHtml(s.type)}) ${s.enabled?'启用':'停用'}
@@ -136,7 +138,9 @@ window.addSource = async () => {
   await api.post('/api/sources', {
     type: $('#src-type').value || 'hotlist',
     name: $('#src-name').value,
-    url: $('#src-url').value
+    url: $('#src-url').value,
+    items_path: $('#src-items-path').value || 'data',
+    title_field: $('#src-title-field').value || 'title'
   });
   loadSources();
 };

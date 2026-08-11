@@ -34,6 +34,8 @@ class SourceIn(BaseModel):
     type: str
     name: str
     url: str
+    items_path: str = "data"
+    title_field: str = "title"
 
 class SettingIn(BaseModel):
     key: str
@@ -130,7 +132,8 @@ def create_app(db_path: str) -> FastAPI:
     @app.post("/api/sources")
     def create_source(body: SourceIn):
         with conn() as c:
-            sid = models.create_source(c, type=body.type, name=body.name, url=body.url)
+            sid = models.create_source(c, type=body.type, name=body.name, url=body.url,
+                                        items_path=body.items_path, title_field=body.title_field)
             return {"id": sid}
 
     @app.post("/api/sources/{source_id}/toggle")

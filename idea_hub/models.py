@@ -86,9 +86,9 @@ def get_active_target(conn):
 def list_targets(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM targets ORDER BY id").fetchall()]
 
-def create_source(conn, *, type, name, url, enabled=True):
-    cur = conn.execute("INSERT INTO sources (type, name, url, enabled) VALUES (?,?,?,?)",
-                       (type, name, url, 1 if enabled else 0))
+def create_source(conn, *, type, name, url, enabled=True, items_path="data", title_field="title"):
+    cur = conn.execute("INSERT INTO sources (type, name, url, enabled, items_path, title_field) VALUES (?,?,?,?,?,?)",
+                       (type, name, url, 1 if enabled else 0, items_path, title_field))
     conn.commit()
     return cur.lastrowid
 

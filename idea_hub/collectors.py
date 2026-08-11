@@ -11,14 +11,16 @@ def _dig(obj, path):
         else: return None
     return obj
 
-def fetch_hotlist(url, items_path="data", session=None):
+def fetch_hotlist(url, items_path="data", title_field="title", session=None):
     s = session or requests
     resp = s.get(url, timeout=15)
     resp.raise_for_status()
     data = _dig(resp.json(), items_path) or []
     out = []
     for it in data:
-        item = {"title": str(it.get("title", "")).strip(),
+        if not isinstance(it, dict):
+            continue
+        item = {"title": str(it.get(title_field, "")).strip(),
                 "url": str(it.get("url", "")).strip()}
         parts = []
         if it.get("hot") is not None: parts.append(f"热度:{it['hot']}")
@@ -51,7 +53,9 @@ def collect_all(conn):
     collected, errors = 0, []
     for src in models.list_sources(conn, enabled_only=True):
         try:
-            items = fetch_rss(src["url"]) if src["type"] == "rss" else fetch_hotlist(src["url"])
+            items = fetch_rss(src["url"]) if src["type"] == "rss" else fetch_hotlist(
+                src["url"], items_path=src.get("items_path", "data"),
+                title_field=src.get("title_field", "title"))
             for it in items:
                 collected += _upsert_hot_item(conn, src["id"], it)
             conn.commit()

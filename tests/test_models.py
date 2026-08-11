@@ -118,3 +118,16 @@ def test_foreign_keys_enforced(conn):
     """hot_items.source_id 引用不存在的 sources.id 必须抛 IntegrityError（回归：FK 未启用时静默插入）。"""
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (999, 'x', 'http://x')")
+
+def test_create_source_with_custom_fields(conn):
+    sid = models.create_source(conn, type="hotlist", name="自定义", url="http://x",
+                               items_path="data.list", title_field="name")
+    src = models.list_sources(conn)[-1]
+    assert src["items_path"] == "data.list"
+    assert src["title_field"] == "name"
+
+def test_create_source_defaults_backward_compatible(conn):
+    sid = models.create_source(conn, type="rss", name="默认", url="http://y")
+    src = models.list_sources(conn)[-1]
+    assert src["items_path"] == "data"
+    assert src["title_field"] == "title"

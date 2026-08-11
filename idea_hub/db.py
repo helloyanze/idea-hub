@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS sources (
     type TEXT NOT NULL CHECK (type IN ('hotlist','rss')),
     name TEXT NOT NULL,
     url TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    items_path TEXT NOT NULL DEFAULT 'data',
+    title_field TEXT NOT NULL DEFAULT 'title'
 );
 CREATE TABLE IF NOT EXISTS hot_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +70,16 @@ def connect(path: str) -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """轻量迁移：为已有数据库补充新增列（CREATE TABLE IF NOT EXISTS 不处理已存在表）。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sources)").fetchall()}
+    if "items_path" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN items_path TEXT NOT NULL DEFAULT 'data'")
+    if "title_field" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN title_field TEXT NOT NULL DEFAULT 'title'")
 
 def backup_db(conn: sqlite3.Connection, backups_dir: str) -> str:
     pathlib.Path(backups_dir).mkdir(parents=True, exist_ok=True)
