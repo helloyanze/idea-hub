@@ -5,3 +5,11 @@ data/
 outputs/
 backups/
 *.pyc
+# 敏感文件
+.env
+*.env
+*.pem
+*.json
+!web/vendor/*.json
+sub*.yaml
+config*.yaml
