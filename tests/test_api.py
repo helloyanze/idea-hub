@@ -80,3 +80,24 @@ def test_delete_source_cascades_hot_items(client):
     assert conn.execute("SELECT COUNT(*) FROM hot_items WHERE source_id=?", (sid,)).fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM sources WHERE id=?", (sid,)).fetchone()[0] == 0
     conn.close()
+
+def test_delete_source_clears_task_hot_item_ref(client):
+    """回归：任务经 tasks.hot_item_id 引用来源热点时删除来源——task 保留且 hot_item_id 置 NULL"""
+    sid = client.post("/api/sources", json={"type": "rss", "name": "RSS源",
+                                            "url": "http://rss"}).json()["id"]
+    conn = db.connect(client.app.state.db_path)
+    conn.execute("INSERT INTO hot_items (source_id, title, url) VALUES (?, 'R1', 'http://r1')", (sid,))
+    conn.commit()
+    hid = conn.execute("SELECT id FROM hot_items WHERE source_id=?", (sid,)).fetchone()["id"]
+    conn.close()
+    body = {"title": "t", "idea_summary": "s", "target_id": 1, "hot_item_id": hid,
+            "feasibility_score": 7, "score_breakdown": "{}", "idea_path": ""}
+    tid = client.post("/api/tasks", json=body).json()["id"]
+    r = client.delete(f"/api/sources/{sid}")
+    assert r.status_code == 200
+    conn = db.connect(client.app.state.db_path)
+    assert conn.execute("SELECT COUNT(*) FROM hot_items WHERE source_id=?", (sid,)).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM sources WHERE id=?", (sid,)).fetchone()[0] == 0
+    task = conn.execute("SELECT id, hot_item_id FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert task is not None and task["hot_item_id"] is None
+    conn.close()

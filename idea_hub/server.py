@@ -146,8 +146,10 @@ def create_app(db_path: str) -> FastAPI:
         with conn() as c:
             src = next((s for s in models.list_sources(c) if s["id"] == source_id), None)
             if not src: raise HTTPException(404, "source not found")
-            # 级联删除（FK 启用后按依赖顺序）：task_links → hot_items → sources，单事务
+            # 级联删除（FK 启用后按依赖顺序）：task_links → tasks.hot_item_id 清引用 → hot_items → sources，单事务
             c.execute("DELETE FROM task_links WHERE hot_item_id IN "
+                      "(SELECT id FROM hot_items WHERE source_id=?)", (source_id,))
+            c.execute("UPDATE tasks SET hot_item_id=NULL WHERE hot_item_id IN "
                       "(SELECT id FROM hot_items WHERE source_id=?)", (source_id,))
             c.execute("DELETE FROM hot_items WHERE source_id=?", (source_id,))
             c.execute("DELETE FROM sources WHERE id=?", (source_id,))
