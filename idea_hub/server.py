@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from idea_hub import db, models
+from idea_hub import db, models, services
 
 # ---- Basic Auth（公网部署启用：设置 IDEAHUB_AUTH_USER / IDEAHUB_AUTH_PASS 环境变量） ----
 _AUTH_USER = os.environ.get("IDEAHUB_AUTH_USER", "")
@@ -83,6 +83,31 @@ def create_app(db_path: str) -> FastAPI:
         with conn() as c:
             return models.stats(c, target_id)
 
+    @app.get("/api/hotspots")
+    def hotspots(page: int = 1, page_size: int = 20):
+        with conn() as c:
+            try:
+                return services.get_hotspot_summary(c, page, page_size)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+
+    @app.get("/api/queues")
+    def queues():
+        with conn() as c:
+            return services.get_queue_summary(c)
+
+    @app.get("/api/queues/{status}")
+    def queue_items(status: str, page: int = 1, page_size: int = 20):
+        with conn() as c:
+            try:
+                return services.get_queue_items(c, status, page, page_size)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+
+    @app.post("/api/generate")
+    def generate():
+        return services.generate_ideas(db_path, repo_root)
+
     @app.get("/api/tasks")
     def list_tasks(status: str | None = None, target_id: int | None = None):
         with conn() as c:
@@ -160,11 +185,7 @@ def create_app(db_path: str) -> FastAPI:
     @app.post("/api/collect")
     def collect_now():
         """立即收集（含评分分流）。"""
-        from . import collectors
-        with conn() as c:
-            res = collectors.collect_all(c)
-        return {"collected": res["collected"], "discarded": res["discarded"],
-                "review": res["review"], "errors": res["errors"]}
+        return services.collect_ideas(db_path, repo_root)
 
     @app.get("/api/targets")
     def list_targets():
