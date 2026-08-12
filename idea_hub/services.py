@@ -4,12 +4,16 @@ import sqlite3
 
 from idea_hub import collectors, db, models
 
+MAX_PAGE_SIZE = 100
+
 
 def _page_args(page, page_size):
     if page < 1:
         raise ValueError("page must be >= 1")
     if page_size < 1:
         raise ValueError("page_size must be >= 1")
+    if page_size > MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be <= {MAX_PAGE_SIZE}")
     return page, page_size
 
 

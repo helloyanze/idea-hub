@@ -139,7 +139,7 @@ def test_auth_required_when_enabled(monkeypatch):
         app = server_mod.create_app(str(tmp_path_for_auth()))
         client = TestClient(app)
         assert client.get("/").status_code == 401
-        assert client.get("/", headers={"Authorization": "Basic " + base64.b64encode(b"idea:wrong").decode()}).status_code == 401
+        assert client.get("/api/queues", headers={"Authorization": "Basic " + base64.b64encode(b"idea:wrong").decode()}).status_code == 401
         ok = client.get("/", headers={"Authorization": "Basic " + base64.b64encode(b"idea:secret").decode()})
         assert ok.status_code == 200
     finally:

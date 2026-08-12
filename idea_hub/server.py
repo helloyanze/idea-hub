@@ -1,4 +1,5 @@
 import base64, hmac, json, os, pathlib
+from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -75,8 +76,14 @@ def create_app(db_path: str) -> FastAPI:
         return await call_next(request)
     app.state.db_path = db_path
 
+    @contextmanager
     def conn():
-        c = db.connect(db_path); db.init_schema(c); return c
+        c = db.connect(db_path)
+        try:
+            db.init_schema(c)
+            yield c
+        finally:
+            c.close()
 
     @app.get("/api/stats")
     def stats(target_id: int | None = None):

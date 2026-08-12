@@ -64,6 +64,11 @@ def test_get_hotspot_summary_empty(conn):
     }
 
 
+def test_page_args_rejects_page_size_above_documented_maximum(conn):
+    with pytest.raises(ValueError, match="page_size must be <= 100"):
+        services.get_hotspot_summary(conn, page=1, page_size=101)
+
+
 def test_get_queue_summary_returns_all_statuses_for_empty_and_populated_queues(conn, target_id):
     assert services.get_queue_summary(conn) == {status: 0 for status in models.STATUSES}
     _add_task(conn, target_id, "Todo")
