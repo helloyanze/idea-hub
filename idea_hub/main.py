@@ -14,6 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 from . import db
 from .config import Config
 from .errors import AppError, INTERNAL, RATE_LIMITED
+from .routers.settings import router as settings_router
 
 
 _basic = HTTPBasic(auto_error=False)
@@ -131,6 +132,7 @@ def create_app(config: Config) -> FastAPI:
         }
 
     app.include_router(router)
+    app.include_router(settings_router, dependencies=[Depends(require_auth)])
     app.add_middleware(
         CORSMiddleware,
         allow_origins=getattr(config, "cors_origins", ["http://localhost:5173"]),
