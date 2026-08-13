@@ -37,6 +37,17 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;',
 const scoreClass = s => s == null ? "none" : s >= 8 ? "green" : s >= 6 ? "yellow" : "red";
 const scoreText = s => s == null ? "--" : s;
 
+/* 内容类型与复杂标记徽标 */
+const ctMap = {short: "短文", long: "长文", video_script: "视频"};
+function badgeHtml(t) {
+  let h = `<span class="ct-badge ct-${t.content_type || 'long'}">${ctMap[t.content_type] || '长文'}</span>`;
+  if (t.is_complex) h += `<span class="ct-badge complex">复杂</span>`;
+  return h;
+}
+
+/* 设置项缓存：key -> value（loadAll 填充，弹窗 / 顶部开关共用） */
+let SETTINGS = {};
+
 function toast(msg, kind = "") {
   const t = document.createElement("div");
   t.className = "toast " + kind;
@@ -57,11 +68,15 @@ async function loadAll() {
   TAGS = tags.items;
   TARGETS = targets.items;
   SOURCES = sources.items;
+  SETTINGS = {};
+  (settings.items || []).forEach(x => { SETTINGS[x.key] = x.value; });
   renderTargets();
   renderTagFilter();
   const autoRun = (settings.items || []).find(x => x.key === 'auto_run');
   $("#autoSwitch").classList.toggle('on', autoRun ? autoRun.value !== '0' : true);
   renderBoard(stats);
+  refreshHealth();
+  refreshNotifications();
 }
 
 function renderTargets() {
@@ -168,6 +183,7 @@ function cardEl(t) {
     <div class="title">${esc(t.title)}</div>
     <div class="meta">
       <span class="score ${scoreClass(t.feasibility_score)}">${scoreText(t.feasibility_score)}分</span>
+      ${badgeHtml(t)}
       ${tags}
     </div>
     <div class="summary">${esc(t.idea_summary || "")}</div>`;
@@ -275,6 +291,34 @@ async function openDrawer(id) {
       <div class="tags-row">${tags}<span class="add" id="drAddTag">+ 添加标签</span></div>
     </div>
     <div class="sec">
+      <h4><svg class="ic" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="3"/></svg>执行设置</h4>
+      <div class="set-grid">
+        <label class="set-field">内容类型
+          <select id="drContentType">
+            <option value="short">短文</option>
+            <option value="long">长文</option>
+            <option value="video_script">视频脚本</option>
+          </select>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="drComplex" ${t.is_complex ? "checked" : ""}>
+          <span>复杂任务<span class="hint">判定标准：需联网调研 / 多源交叉验证 / 深度长文 2000 字以上</span></span>
+        </label>
+        <label class="set-field">打回意见（redo_note）
+          <textarea class="field" id="drRedoNote" placeholder="记录打回 / 重做原因…">${esc(t.redo_note || "")}</textarea>
+        </label>
+      </div>
+    </div>
+    <div class="sec">
+      <h4><svg class="ic" viewBox="0 0 24 24"><path d="M12 8v5m0 3h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>执行情况</h4>
+      <div class="fail-box">
+        <div class="fail-count">失败次数：<b id="drFailCount">${t.fail_count ?? 0}</b></div>
+        <div class="fail-reason">最近失败原因：${esc(t.last_fail_reason || "无")}</div>
+        <button class="btn mini danger" id="drResetFail">重置失败计数</button>
+      </div>
+      <div class="rel" id="drVersions" style="margin-top:9px"></div>
+    </div>
+    <div class="sec">
       <h4><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>摘要</h4>
       <textarea class="field" id="drSummary">${esc(t.idea_summary || "")}</textarea>
     </div>
@@ -308,6 +352,18 @@ async function openDrawer(id) {
     openDrawer(id);
   });
 
+  $("#drContentType").value = t.content_type || "long";
+  $("#drResetFail").addEventListener("click", async () => {
+    try {
+      await api.post(`/api/tasks/${id}/reset-failures`);
+      toast("失败计数已重置", "ok");
+      openDrawer(id);
+    } catch (err) {
+      toast("重置失败：" + err.message, "err");
+    }
+  });
+  renderVersions(t);
+
   // 底部操作按钮随状态变化
   const runBtn = $("#drRun");
   const backIcon = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>';
@@ -332,6 +388,27 @@ function closeDrawer() {
   $("#drawerScrim").classList.remove("show");
   $("#drawer").setAttribute("aria-hidden", "true");
   curId = null;
+}
+
+/* 探测产出目录中的历史版本文件（output_vN.md），存在则给出下载链接 */
+async function renderVersions(t) {
+  const box = $("#drVersions");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!t.output_path) return;
+  const dir = t.output_path.replace(/^outputs\//, "").replace(/\/[^/]+$/, "");
+  const links = [];
+  for (let n = 2; n <= 10; n++) {
+    const u = `/outputs/${dir}/output_v${n}.md`;
+    try {
+      const r = await fetch(u, {method: "HEAD"});
+      if (r.ok) links.push(`<a href="${u}" target="_blank">历史版本 v${n}</a>`);
+      else if (r.status === 404) break;
+    } catch (e) { break; }
+  }
+  if (links.length) {
+    box.innerHTML = '<span style="color:var(--text-3);font-size:12px;padding:2px 4px">版本下载：</span>' + links.join("");
+  }
 }
 
 function md(s) {
@@ -460,7 +537,7 @@ function renderArchived() {
         <button class="qbtn del" title="删除"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
       </div>
       <div class="title">${esc(t.title)}</div>
-      <div class="meta"><span class="score ${scoreClass(t.feasibility_score)}">${scoreText(t.feasibility_score)}分</span>${tags}</div>
+      <div class="meta"><span class="score ${scoreClass(t.feasibility_score)}">${scoreText(t.feasibility_score)}分</span>${badgeHtml(t)}${tags}</div>
       <div class="summary">${esc(t.idea_summary || "")}</div>`;
     c.addEventListener("click", e => {
       if (e.target.closest(".quick")) return;
@@ -481,6 +558,125 @@ function renderArchived() {
   });
 }
 
+/* =================== 顶部状态栏：调度健康 / 今日 token / 未读角标 =================== */
+async function refreshHealth() {
+  try {
+    const h = await api.get("/api/health");
+    const el = $("#schedStatus");
+    if (h.minutes_ago === null) {
+      el.textContent = "调度: 未知";
+      el.className = "sched-warn";
+    } else if (h.minutes_ago > 15) {
+      el.textContent = `调度: ${h.minutes_ago} 分钟前`;
+      el.className = "sched-bad";
+    } else {
+      el.textContent = `调度: ${h.minutes_ago} 分钟前`;
+      el.className = "sched-ok";
+    }
+    $("#tokenToday").textContent = `今日: ${h.today_tokens ?? 0}`;
+  } catch (e) { /* 忽略，下次刷新重试 */ }
+}
+
+async function refreshNotifications() {
+  try {
+    const n = await api.get("/api/notifications?unread_only=1");
+    const badge = $("#notifBadge");
+    badge.textContent = n.unread;
+    badge.classList.toggle("hidden", n.unread === 0);
+  } catch (e) { /* 忽略 */ }
+}
+
+/* =================== 通知中心抽屉 =================== */
+const notifTypeMap = {task_done: "完成", task_fail: "失败", exec_start: "执行", info: "信息"};
+
+async function renderNotifications() {
+  const n = await api.get("/api/notifications");
+  const list = $("#notifList");
+  list.innerHTML = n.items.length
+    ? n.items.map(it => `
+      <div class="notif-item ${it.is_read ? "" : "unread"}" data-id="${it.id}">
+        <div class="n-head">
+          <span class="notif-type">${notifTypeMap[it.type] || esc(it.type)}</span>
+          <span class="n-time">${esc((it.created_at || "").replace("T", " ").slice(0, 16))}</span>
+        </div>
+        <div class="n-title">${esc(it.title)}</div>
+        ${it.body ? `<div class="n-body">${esc(it.body)}</div>` : ""}
+      </div>`).join("")
+    : '<div class="empty"><b>暂无通知</b>执行完成 / 失败等事件会显示在这里</div>';
+  list.querySelectorAll(".notif-item.unread").forEach(el => el.addEventListener("click", async () => {
+    try {
+      await api.post(`/api/notifications/${el.dataset.id}/read`);
+      el.classList.remove("unread");
+      refreshNotifications();
+    } catch (e) { /* 忽略 */ }
+  }));
+}
+
+function openNotif() {
+  $("#notifDrawer").classList.add("show");
+  $("#notifScrim").classList.add("show");
+  $("#notifDrawer").setAttribute("aria-hidden", "false");
+  renderNotifications().catch(e => toast("通知加载失败", "err"));
+}
+
+function closeNotif() {
+  $("#notifDrawer").classList.remove("show");
+  $("#notifScrim").classList.remove("show");
+  $("#notifDrawer").setAttribute("aria-hidden", "true");
+}
+
+/* =================== 设置弹窗 =================== */
+const SETTING_FIELDS = [
+  {key: "auto_run", label: "每晚自动运行", type: "switch", hint: "夜间定时自动收集与调度"},
+  {key: "auto_execute", label: "自动执行任务", type: "switch", hint: "调度器自动领取等待区任务（插队不受此开关影响）"},
+  {key: "max_concurrent", label: "最大并发数", type: "number", hint: "同时执行的 LLM 任务数"},
+  {key: "max_fail_count", label: "最大失败次数", type: "number", hint: "连续失败超过该次数将停止重试"},
+  {key: "stale_simple_min", label: "简单任务卡死判定（分钟）", type: "number"},
+  {key: "stale_complex_min", label: "复杂任务卡死判定（分钟）", type: "number"},
+  {key: "max_daily_tokens", label: "每日 token 上限", type: "number", hint: "达到上限后自动领取暂停"},
+  {key: "qq_target", label: "QQ 推送目标", type: "text", hint: "如 qq:123456，留空不推送", placeholder: "qq:123456"},
+];
+
+function renderSettings() {
+  const body = $("#settingsBody");
+  body.innerHTML = SETTING_FIELDS.map(f => {
+    const v = SETTINGS[f.key] ?? "";
+    if (f.type === "switch") {
+      return `<div class="set-row"><label>${f.label}${f.hint ? `<small>${f.hint}</small>` : ""}</label>
+        <div class="switch ${v === "1" ? "on" : ""}" data-set-switch="${f.key}"><span class="track"></span></div></div>`;
+    }
+    return `<div class="set-row"><label>${f.label}${f.hint ? `<small>${f.hint}</small>` : ""}</label>
+      <input type="${f.type}" data-set-input="${f.key}" value="${esc(v)}" ${f.placeholder ? `placeholder="${f.placeholder}"` : ""}></div>`;
+  }).join("");
+  body.querySelectorAll("[data-set-switch]").forEach(el => el.addEventListener("click", () => {
+    el.classList.toggle("on");
+  }));
+}
+
+function openSettings() {
+  renderSettings();
+  openModal("#settingsModal");
+}
+
+async function saveSettings() {
+  const updates = [];
+  SETTING_FIELDS.forEach(f => {
+    if (f.type === "switch") {
+      updates.push({key: f.key, value: $(`[data-set-switch="${f.key}"]`).classList.contains("on") ? "1" : "0"});
+    } else {
+      const el = $(`[data-set-input="${f.key}"]`);
+      updates.push({key: f.key, value: el.value.trim()});
+    }
+  });
+  for (const u of updates) {
+    await api.put("/api/settings", u);
+    SETTINGS[u.key] = u.value;
+  }
+  $("#autoSwitch").classList.toggle("on", SETTINGS.auto_run === "1");
+  closeModal("#settingsModal");
+  toast("设置已保存", "ok");
+}
+
 /* =================== 事件绑定 =================== */
 $("#tagFilter").addEventListener("change", renderBoard);
 $("#searchInput").addEventListener("input", renderBoard);
@@ -494,11 +690,17 @@ $("#drSave").addEventListener("click", async () => {
     idea_summary: $("#drSummary").value,
     feasibility_score: Number($("#drScore").value),
     notes: $("#drNotes").value,
+    content_type: $("#drContentType").value,
+    is_complex: $("#drComplex").checked ? 1 : 0,
+    redo_note: $("#drRedoNote").value,
   });
   t.title = $("#drTitle").value;
   t.idea_summary = $("#drSummary").value;
   t.feasibility_score = Number($("#drScore").value);
   t.notes = $("#drNotes").value;
+  t.content_type = $("#drContentType").value;
+  t.is_complex = $("#drComplex").checked ? 1 : 0;
+  t.redo_note = $("#drRedoNote").value;
   renderBoard();
   toast("修改已保存", "ok");
   closeDrawer();
@@ -506,6 +708,32 @@ $("#drSave").addEventListener("click", async () => {
 $("#drDel").addEventListener("click", () => curId && delTask(curId));
 $("#openSource").addEventListener("click", () => { renderSources(); openModal("#sourceModal"); });
 $("#openTag").addEventListener("click", () => { renderTags(); openModal("#tagModal"); });
+
+/* 通知中心 */
+$("#notifBtn").addEventListener("click", openNotif);
+$("#notifClose").addEventListener("click", closeNotif);
+$("#notifScrim").addEventListener("click", closeNotif);
+$("#notifReadAll").addEventListener("click", async () => {
+  try {
+    await api.post("/api/notifications/read-all");
+    toast("已全部标记为已读", "ok");
+    await renderNotifications();
+    refreshNotifications();
+  } catch (err) {
+    toast("操作失败：" + err.message, "err");
+  }
+});
+
+/* 设置弹窗 */
+$("#openSettings").addEventListener("click", openSettings);
+$("#more-settings").addEventListener("click", () => { moreMenu.hidden = true; openSettings(); });
+$("#settingsSave").addEventListener("click", async () => {
+  try {
+    await saveSettings();
+  } catch (err) {
+    toast("保存失败：" + err.message, "err");
+  }
+});
 
 /* 窄屏更多菜单 */
 const moreMenu = $("#moreMenu");
@@ -564,6 +792,7 @@ document.querySelectorAll("#stats .stat").forEach(el => el.addEventListener("cli
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeDrawer();
+    closeNotif();
     document.querySelectorAll(".modal.show").forEach(m => m.classList.remove("show"));
   }
   if (e.key === "/" && document.activeElement !== $("#searchInput")) {
@@ -616,3 +845,6 @@ loadAll().catch(err => {
   });
   console.error(err);
 });
+
+/* 每 60 秒刷新调度健康与未读角标 */
+setInterval(() => { refreshHealth(); refreshNotifications(); }, 60000);
