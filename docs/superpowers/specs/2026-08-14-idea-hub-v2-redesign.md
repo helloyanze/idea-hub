@@ -1,7 +1,7 @@
 # Idea Hub v2 重构设计规格
 
 - 日期：2026-08-14
-- 状态：已确认（逐节评审通过）
+- 状态：已确认（逐节评审通过）；外部审阅后修订（rev2，含审阅回应记录）
 - 范围：前后端全面重构，产品级重新设计
 - 关联：`docs/superpowers/plans/2026-08-11-idea-queue-implementation.md`、`docs/superpowers/specs/2026-08-13-auto-execution-design.md`（v2 取代并整合两者）
 
@@ -20,8 +20,8 @@ Idea Hub v1（2026-08-11 ~ 08-13 快速迭代，70+ 提交）功能覆盖收集�
 ## 2. 重构目标
 
 - 核心链路保留：收集 → 评分 → 生成 idea → 看板管理 → AI 执行产出
-- 次要功能简化：评分三档分流改两档、留档队列砍掉、targets 砍掉
-- 新增能力：markdown 产物编辑（编辑/下载/上传/版本）、热点全文搜索、来源测试抓取、知识库底子（FTS5）
+- 次要功能简化：评分三档分流改两档、留档队列砍掉、targets 表砍掉
+- 新增能力：markdown 产物编辑（编辑/下载/上传/版本）、热点全文搜索、来源测试抓取、异步任务追踪、知识库底子（FTS5）
 - 体验目标：交互无感知延迟、移动端可用、暗色模式、简约风格
 
 ## 3. 已确认决策（决策记录）
@@ -34,13 +34,16 @@ Idea Hub v1（2026-08-11 ~ 08-13 快速迭代，70+ 提交）功能覆盖收集�
 | D4 | 知识库分三层渐进：L1 FTS5 全文索引（重构内）→ L2 sqlite-vec 向量检索（后续）→ L3 RAG 问答（最后） | 零运维、随备份走；个人系统规模不需要重型向量库 |
 | D5 | QQ 集成由 Hermes 接管：ideahub 只提供 API + 事件记录（notifications 表），Hermes 负责查询/推送/操作 | 分工清晰，ideahub 不内嵌 QQ 逻辑 |
 | D6 | 评分分流三档（收录/复核/丢弃）简化为两档（收录/丢弃） | 复核档实际利用率低，简化决策 |
-| D7 | 状态机五状态减为四状态：archived 合并进 todo，低分直接 discard 不进库 | 留档队列砍掉 |
-| D8 | targets（目标模式）表砍掉 | 多目标模式实际未用，target 概念并入任务字段 |
-| D9 | settings 表砍掉，并入 config 文件 | 配置项少，无需库表 |
+| D7 | 状态机四状态：todo / waiting / in_progress / done。不设 archived 状态：完成任务停留在 done（可按完成时间排序），低分直接 discard 不进库 | 留档队列砍掉；"已归档"语义与 todo 相反，不合并，直接取消归档概念 |
+| D8 | targets 表砍掉，target 概念并入 tasks.target_desc（普通文本字段，如"自媒体内容"） | 多目标模式实际未用；文本字段避免悬空外键 |
+| D9 | 配置分层：静态配置入 config 文件（端口、auth、备份路径）；动态参数（评分阈值、收集频率、每日预算上限）入精简 settings 表 | 运行时需调整的参数不能写死在文件 |
 | D10 | execute_requests 表砍掉，并入 tasks 执行字段 | 减少表间关联 |
 | D11 | 开发方式：垂直切片，8 个切片逐个交付，每片全链路可运行 | 每步有可验收成果 |
-| D12 | 产物双写：markdown 落盘 outputs/tasks/<id>/output.md + outputs 表存元数据与内容缓存 | 支持 Web 编辑、版本记录、全文索引，同时保持文件可被外部工具使用 |
-| D13 | 保留：SQLite WAL + 每日备份、cron 调度、Basic Auth、Cloudflare Tunnel、Hermes agent 工作流 | 已验证可用，不重写 |
+| D12 | 产物双写：markdown 落盘 outputs/tasks/<id>/output.md + outputs 表存元数据与内容缓存；读时以文件为准校验 mtime/hash，不一致自动回写 DB + FTS | 支持 Web 编辑、版本记录、全文索引，同时保持文件可被外部工具使用 |
+| D13 | 保留：SQLite WAL + 每日备份、cron 调度、Basic Auth、Cloudflare Tunnel | 已验证可用，不重写 |
+| D14 | 生成编排本地化：ideahub 直接调用 DeepSeek LLM 生成 idea（复用执行器的 LLM 调用层 + 生成 prompt 模板），不依赖 Hermes 在线；Hermes 仅作 QQ 交互层（查询/推送/操作） | 消除 ideahub ↔ Hermes 循环耦合；cron 全自动运行不依赖 Hermes 可用性；LLM 调用层已被 executor 验证 |
+| D15 | 长任务异步化：pipeline 端点（collect/generate/execute）立即返回 job_id，jobs 表追踪进度，前端轮询（可选 SSE） | 避免请求挂起超时，用户可见进度 |
+| D16 | 产物版本：outputs 表每版本一行，(task_id, version) 联合主键；PUT/上传写入新版本行 + 落盘，不覆盖旧版本 | 支持真实版本历史回溯 |
 
 ## 4. 整体架构
 
@@ -50,33 +53,39 @@ React SPA (web/)
         │ REST /api/v1（Basic Auth）
 FastAPI 后端（idea_hub/ 包，领域分层）
   routers/ → services/ → models/ → SQLite (WAL)
-  收集器 + 评分 + 生成编排 + 执行器 + 调度器
+  收集器 + 评分 + 生成（本地 LLM）+ 执行器 + 调度器 + jobs
         │ notifications 表 + 事件记录
-Hermes（云端 QQ bot，7×24）
+Hermes（云端 QQ bot，7×24，仅交互层）
   查询状态 / 主动推送 / 菜单操作（经 API 接管）
 ```
+
+依赖方向：Hermes → ideahub API（单向）。ideahub 不反向调用 Hermes；ideahub 生成/执行直接调用 DeepSeek API（key 在 .env），全自动运行完全自治。
 
 ### 4.1 后端目录结构
 
 ```
 idea_hub/
-  main.py            # FastAPI 入口：挂路由、Basic Auth、静态文件、全局异常处理
-  db.py              # 连接、schema、轻量迁移、FTS5、WAL 安全备份
+  main.py            # FastAPI 入口：挂路由、Basic Auth、静态文件、全局异常处理、限流
+  config.py          # 静态配置加载（config.yaml）
+  db.py              # 连接、schema、轻量迁移（schema_version）、FTS5 触发器、WAL 安全备份
   models.py          # 数据访问层（纯 SQL 封装，无业务逻辑）
   routers/
     sources.py       # 来源 CRUD + toggle + test
     hotspots.py      # 热点列表/过滤/搜索
-    tasks.py         # 任务 CRUD + move + tags + execute + reset-failures
+    tasks.py         # 任务 CRUD + move + tags + execute + redo + reset-failures
     outputs.py       # 产物：GET/PUT/upload/versions
-    pipeline.py      # collect / generate / execute 触发
+    jobs.py          # 异步任务：创建/查询/列表/SSE 流
+    pipeline.py      # collect / generate / execute 触发（异步）
     stats.py         # 统计 + 健康
     notifications.py # 通知列表/已读
   services/
-    collect.py       # 收集编排（含源头过滤/去重）
+    collect.py       # 收集编排（含源头过滤/去重，异步 job）
     score.py         # 两档分流 + LLM 评分
-    generate.py      # 生成编排（Hermes agent 工作流入口）
-    execute.py       # 执行编排（幂等）
+    generate.py      # 生成编排（本地 LLM，异步 job）
+    execute.py       # 执行编排（幂等，异步 job）
+    jobs.py          # job 生命周期管理
     notify.py        # 事件写入 notifications
+    outputs.py       # 产物读写/版本/文件校验回写
   collectors.py      # 多源抓取（扩渠道）
   scorer.py          # 评分逻辑（重构）
   executor.py        # LLM 执行器（重构）
@@ -93,11 +102,12 @@ web/
     main.tsx
     App.tsx              # 布局壳：左侧导航 + 主内容区 + 暗色切换
     api/client.ts        # fetch 封装 + 错误统一处理
-    api/hooks.ts         # React Query hooks
+    api/hooks.ts         # React Query hooks（含 job 轮询 hook）
     components/
       kanban/            # 看板列、卡片（@dnd-kit 拖拽）
       score/             # 评分徽章、多维评分条、总分色阶
       editor/            # markdown 编辑器（编辑/预览/下载/上传/版本）
+      jobs/              # 任务进度条（收集/生成/执行进行中提示）
       notifications/     # 通知列表 + 角标
       common/            # 通用组件（错误态、toast、分页）
     pages/
@@ -113,45 +123,61 @@ web/
 
 ### 5.1 表结构
 
-**核心表（6 张）：**
+**核心表（7 张）：**
 
 | 表 | 字段要点 | 说明 |
 |---|---|---|
-| `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | 渠道类型含新增渠道；channel_config 存渠道特定配置（JSON） |
-| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict | verdict: admit/discard（两档） |
-| `tasks` | id, title, idea_summary, content_type, status, feasibility_score, score_breakdown, target_id, expire_at, idea_path, output_path, ai_summary, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done |
+| `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口（见 5.4） |
+| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date 用于 discard 清理 |
+| `tasks` | id, title, idea_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, idea_path, output_path, ai_summary, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4 |
 | `task_links` | task_id, hot_item_id | 多对多关联 |
-| `tags` | id, name, color | 标签 |
+| `tags` | id, name UNIQUE, color | name 唯一约束 |
 | `task_tags` | task_id, tag_id | 标签关联 |
+| `settings` | key TEXT PRIMARY KEY, value | 动态参数：score_todo_threshold、collect_interval_hours、daily_budget_tokens 等（见 D9） |
 
-**新表（2 张）：**
+**新表（4 张）：**
 
 | 表 | 字段要点 | 说明 |
 |---|---|---|
-| `notifications` | id, type, title, body, level, is_read, created_at | 事件记录，Hermes 巡检推送源 |
-| `outputs` | id, task_id, filename, content, version, created_at, updated_at | 产物元数据 + markdown 内容缓存，支持版本历史 |
+| `notifications` | id, type, title, body, level, entity_type, entity_id, is_read, created_at | entity_type/entity_id 关联任务/热点，前端可跳转，Hermes 推送可定位 |
+| `outputs` | task_id, version, filename, content, file_mtime, file_hash, created_at, updated_at | (task_id, version) 联合主键，每版本一行；file_mtime/file_hash 供读时校验（见 5.3） |
+| `jobs` | id, type, status, progress, result_ref, error, created_at, updated_at | status: pending/running/done/failed；长任务异步追踪（见 D15） |
+| `schema_version` | version | 迁移版本号（未来 schema 演进用，本次不迁移数据） |
 
-**FTS5 虚拟表（1 张）：**
+**FTS5 虚拟表（3 张，external content + 触发器）：**
 
-| 表 | 索引内容 |
-|---|---|
-| `content_fts` | hot_items(title, content_snapshot) + tasks(title, idea_summary, ai_summary) + outputs(content) |
+| 表 | 索引内容 | 同步方式 |
+|---|---|---|
+| `hot_items_fts` | hot_items(title, content_snapshot) | hot_items 表 INSERT/UPDATE/DELETE 触发器 |
+| `tasks_fts` | tasks(title, idea_summary, ai_summary) | tasks 表触发器 |
+| `outputs_fts` | outputs(content) | outputs 表触发器（PUT/上传/外部文件回写均经 outputs 表，索引自动刷新） |
+
+统一搜索：三张 FTS 表分别 MATCH 后 UNION（rank 排序）。FTS5 不支持跨表自动关联，故拆三表 + 触发器，写入路径统一，无同步遗漏。
 
 ### 5.2 状态机
 
 - 四状态：`todo`（待办）/ `waiting`（等待）/ `in_progress`（进行中）/ `done`（已完成）
 - 状态变更仅通过 move 操作；进入 done 时记录 completed_at
-- 低分（< 阈值）直接 discard，不创建任务
+- 无 archived 状态：完成任务停留在 done；低分（< 阈值）直接 discard，不创建任务
+- 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 move 到 done，备注"已过期"并写通知
 
-### 5.3 产出文件结构
+### 5.3 产出双写与一致性
 
-- 落盘：`outputs/tasks/<id>/output.md`
-- 双写：outputs 表存元数据 + 内容缓存（版本递增）
-- 外部工具可直接编辑落盘文件；Web 编辑后重新同步
+- 落盘：`outputs/tasks/<id>/output.md`（最新版本内容）
+- 双写：outputs 表每版本一行（content 缓存 + file_mtime + file_hash）
+- Web 编辑（PUT）/ 上传：写新版本行（version = max+1）+ 更新落盘文件 + FTS 经触发器刷新
+- 外部文件变更检测：读取产物时以文件为准，对比 file_mtime/file_hash，不一致则自动回写 DB（新版本）与 FTS；不做常驻 watchdog（个人系统，读时校验足够）
+
+### 5.4 字段语义
+
+- `sources.ttl_hours`：该来源热点的时效窗口（小时）。热点 expire_at = collected_at + ttl_hours；过期热点不再作为生成候选；不参与删除（保留历史）
+- `tasks.expire_at`：任务时效。过期任务由调度器自动完成（move → done + 通知）；人工操作不受限
+- `hot_items.content_snapshot`：截断至 2000 字符，防长文膨胀 FTS 索引
+- `hot_items` 清理策略：discard 热点保留 7 天，调度器每日清理（删行 + FTS 触发器同步）
 
 ## 6. API 设计（/api/v1）
 
-统一响应：`{data, error}`；错误 `{error: {code, message}}`；分页 `{items, total, page, size}`。全部端点 Basic Auth 保护。
+统一响应：`{data, error}`；错误 `{error: {code, message}}`；分页 `{items, total, page, size}`。全部端点 Basic Auth 保护 + 应用层限流。
 
 ### 6.1 sources
 
@@ -181,36 +207,47 @@ PATCH  /api/v1/tasks/{id}                    # 编辑（标题/摘要/评分/备
 DELETE /api/v1/tasks/{id}
 POST   /api/v1/tasks/{id}/move      {to_status}
 POST   /api/v1/tasks/{id}/tags      {tag_ids}
-POST   /api/v1/tasks/{id}/execute
-POST   /api/v1/tasks/{id}/reset-failures
+POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）
+POST   /api/v1/tasks/{id}/redo              # 重做已完成任务：status→waiting、fail_count 清零、记录 redo_note
+POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数（区别于 redo：不改变状态）
 ```
 
 ### 6.4 outputs
 
 ```
-GET    /api/v1/tasks/{id}/output             # 取 markdown 正文
-PUT    /api/v1/tasks/{id}/output             # 保存编辑（写库 + 落盘 + 版本+1）
-POST   /api/v1/tasks/{id}/output/upload      # 上传替换（multipart）
-GET    /api/v1/tasks/{id}/output/versions    # 版本历史
+GET    /api/v1/tasks/{id}/output              # 取最新版本 markdown 正文
+PUT    /api/v1/tasks/{id}/output              # 保存编辑：body 含 content + base_version；乐观锁校验（version 不匹配返回 409）；写新版本 + 落盘
+POST   /api/v1/tasks/{id}/output/upload       # 上传替换（multipart，同样写新版本）
+GET    /api/v1/tasks/{id}/output/versions     # 版本历史（全部版本行，含时间）
 ```
 
-### 6.5 pipeline
+### 6.5 pipeline（异步）
 
 ```
-POST /api/v1/collect    {source_ids?}        # 收集（可指定来源或全部）
-POST /api/v1/generate                        # 生成 idea（Hermes 工作流入口）
-POST /api/v1/execute    {task_ids?}          # 批量执行
+POST /api/v1/collect    {source_ids?: []}     # 立即返回 {job_id}；省略 source_ids = 全部启用来源
+POST /api/v1/generate                         # 生成 idea（本地 LLM），返回 {job_id}
+POST /api/v1/execute    {task_ids: []}        # task_ids 必填（至少 1 个）；执行全部需显式列出
+GET  /api/v1/jobs/{job_id}                    # 查询进度 {status, progress, result_ref, error}
+GET  /api/v1/jobs?type=&status=&page=         # 任务列表
+GET  /api/v1/jobs/stream                      # SSE 推送 job 进度（可选增强，前端默认轮询）
 ```
 
 ### 6.6 stats / notifications / health
 
 ```
-GET  /api/v1/stats                           # 队列计数 + token 用量 + 今日产出
-GET  /api/v1/notifications?unread_only=
+GET  /api/v1/stats                           # 队列计数 + token 用量 + 今日产出 + 活跃 job
+GET  /api/v1/notifications?unread_only=&entity_type=&entity_id=
 POST /api/v1/notifications/{id}/read
 POST /api/v1/notifications/read-all
 GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 ```
+
+### 6.7 统一约定
+
+- 长任务端点一律异步：立即返回 job_id，不阻塞 HTTP 请求
+- 写操作幂等：collect/generate/execute 重复触发不重复产出（job 去重 + 执行器幂等）
+- 乐观锁：outputs PUT 必须带 base_version
+- 限流：应用层请求频率限制 + 登录失败延迟；文档注明可升级 Cloudflare Access
 
 ## 7. 前端设计
 
@@ -231,7 +268,7 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 | 热点流 | 热点列表，verdict 徽章、评分展示、来源过滤、搜索 |
 | 任务详情 | 构思/摘要 + 评分明细组件 + markdown 编辑器（编辑/下载/上传/版本） |
 | 来源管理 | 渠道 CRUD + 启停 + 测试抓取 + 渠道预设 |
-| 通知中心 | 列表 + 已读/未读 + 角标 |
+| 通知中心 | 列表 + 已读/未读 + 角标 + 实体跳转 |
 | 统计页 | token 用量、队列计数、今日产出、调度器健康条 |
 
 ### 7.3 评分展示组件
@@ -239,12 +276,17 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 - 多维评分（事实性/验证需求/时效性等）用分组条形图 + 总分徽章
 - 数值色阶：>=8 绿、6-7 黄、<6 红
 
-### 7.4 性能目标
+### 7.4 长任务交互
+
+- 触发收集/生成/执行后：页面显示 job 进度条（React Query 轮询 jobs/{id}，或 SSE 订阅）
+- 任务完成/失败 toast 提示；失败可查看 error 详情与重试
+
+### 7.5 性能目标
 
 - 看板列数据独立拉取、卡片组件 memo 化、拖拽不整页重渲染
 - 交互目标：点击无感知延迟
 
-### 7.5 移动端
+### 7.6 移动端
 
 - 断点：桌面四列、平板两列、手机单列 + 底部导航
 
@@ -252,31 +294,34 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 
 | 切片 | 内容 | 交付物 |
 |---|---|---|
-| S1 骨架 | 后端 app/ 包 + schema + FTS5 + 迁移框架；前端脚手架 + 布局壳 + 暗色 | 空库可启动，健康检查通 |
-| S2 收集 | collectors 扩渠道（知乎热榜、微博热搜、V2EX 等）+ 源头过滤/去重 + sources CRUD + test 端点 | 手动收集跑通，热点流页面可见 |
+| S1 骨架 | 后端包结构 + schema（含 FTS5 触发器、settings、schema_version）+ config；前端脚手架 + 布局壳 + 暗色 | 空库可启动，健康检查通 |
+| S2 收集 | collectors 扩渠道（知乎热榜、微博热搜、V2EX 等）+ 源头过滤/去重 + sources CRUD + test 端点 + collect 异步 job | 手动收集跑通，热点流页面可见，job 进度可见 |
 | S3 评分 | 两档分流 + LLM 评分（复用现有 scorer 重构） | 收集结果带 verdict |
-| S4 生成 | Hermes agent 工作流接入（candidates → generate → import-ideas）+ 标签 | idea 进看板 |
-| S5 看板 | 四列看板 + 拖拽 + 搜索 + 任务详情 + 评分组件 | 完整看板可用 |
-| S6 执行+产物 | 执行器重构 + outputs 表 + markdown 编辑器 + 下载/上传/版本 | 产物全链路 |
-| S7 通知+统计 | 通知事件写入 + 统计页 + 调度器健康 | Hermes 可巡检 |
-| S8 部署 | cron 脚本 + 部署文档 + QQ bot 对接验证 | 云端全自动 |
+| S4 生成 | 生成编排本地化（DeepSeek 直调 + prompt 模板）+ 标签 + generate 异步 job | idea 进看板 |
+| S5 看板 | 四列看板 + 拖拽 + 搜索 + 任务详情 + 评分组件 + 过期处理 | 完整看板可用 |
+| S6 执行+产物 | 执行器重构 + outputs 表（版本化）+ markdown 编辑器 + 下载/上传/版本 + 读时校验 | 产物全链路 |
+| S7 通知+统计 | 通知事件写入（含实体关联）+ 统计页 + 调度器健康 + discard 清理 | Hermes 可巡检 |
+| S8 部署 | cron 脚本 + 部署文档 + QQ bot 对接验证 + 限流验证 | 云端全自动 |
 
 ## 9. 错误处理
 
-- 后端：全局异常处理器；业务错误 `{error: {code, message}}`；LLM/抓取失败不中断主流程（降级 + 通知记录）
+- 后端：全局异常处理器；业务错误 `{error: {code, message}}`；LLM/抓取失败不中断主流程（job 标记 failed + 降级 + 通知记录）
+- 长任务失败：job.error 记录详情，通知表写失败事件（Hermes 推送告警）
+- 生成/执行依赖 DeepSeek API：不可用时 job failed + 通知，核心功能（看板/收集规则过滤）不受影响
 - 前端：React Query 错误态统一组件（重试按钮）；乐观更新失败自动回滚；网络错误 toast
-- 关键操作幂等：执行、生成重复触发不重复产出
+- 关键操作幂等：collect/generate/execute 重复触发不重复产出
+- 限流：应用层频率限制 + 登录失败延迟（防爆破）
 
 ## 10. 测试策略
 
-- 后端：pytest + 内存 SQLite；每切片配套服务层单测 + API 集成测试
-- 前端：Vitest + React Testing Library；核心交互必须有测试（看板拖拽、评分组件、编辑器）
+- 后端：pytest + 内存 SQLite；每切片配套服务层单测 + API 集成测试（jobs 异步、FTS 搜索、版本乐观锁、过期处理、读时校验必测）
+- 前端：Vitest + React Testing Library；核心交互必须有测试（看板拖拽、评分组件、编辑器、job 轮询）
 - e2e：保留一条核心链路测试（收集→评分→生成→执行→产物）
 - 回归审阅：实施完经外部 AI 审阅，逐条回应采纳/不采纳并记录
 
 ## 11. 知识库演进（后续）
 
-- L1（重构内）：FTS5 全文索引，所有文本内容可检索
+- L1（重构内）：三张 FTS5 表 + 触发器，所有文本内容可检索（热点/任务/产物）
 - L2（后续）：sqlite-vec 扩展 + DeepSeek embedding API，语义检索
 - L3（最后）：检索结果喂给 Hermes/LLM 做 RAG 问答（QQ bot："我写过关于 XX 的内容吗"）
 
@@ -284,9 +329,54 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 
 1. 前端交互响应是否达到"无感知延迟"（S5 验收）
 2. 收集质量：新渠道是否有效、源头过滤是否显著降低无用信息（S2 验收）
-3. QQ 推送链路：notifications 表事件 → Hermes 巡检 → 群内推送是否完整（S7 验收）
-4. 产物编辑：Web 编辑 → 落盘文件一致性、版本递增正确性（S6 验收）
+3. QQ 推送链路：notifications 表事件（含实体关联）→ Hermes 巡检 → 群内推送是否完整（S7 验收）
+4. 产物编辑：Web 编辑 → 落盘文件一致性、版本递增正确性、乐观锁 409（S6 验收）
 5. 评分展示美观性、暗色模式、移动端适配（S5 验收）
 6. 幂等性：重复触发 collect/generate/execute 不产生重复数据
-7. FTS5 搜索：热点/任务/产物搜索准确性（S5/S6 验收）
-8. 云端全自动运行稳定性（S8 验收）
+7. FTS5 搜索：热点/任务/产物搜索准确性、外部改文件后索引刷新（S5/S6 验收）
+8. 异步任务：长任务 job 进度可见、失败降级、SSE/轮询正常（S2-S6 验收）
+9. 过期处理：expire_at 自动完成 + 通知；discard 7 天清理（S5/S7 验收）
+10. 云端全自动运行稳定性：生成不依赖 Hermes 在线（S8 验收）
+
+## 13. 外部审阅回应记录
+
+审阅时间：2026-08-14。逐条回应（采纳 / 不采纳 + 处理方式）：
+
+### 一、严重问题
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | tasks.target_id 悬空外键，与 D8 矛盾 | 采纳 | target_id → target_desc 文本字段（D8 修订，5.1 表结构已改） |
+| 2 | outputs 单行 + version 自增无法回溯历史 | 采纳 | outputs 每版本一行，(task_id, version) 联合主键（新增 D16，5.1/6.4 已改） |
+| 3 | archived 合并进 todo 语义不通 | 采纳 | 取消 archived 概念：完成任务停留 done，低分直接 discard（D7 修订，5.2 已改） |
+| 4 | FTS5 跨三表同步机制缺失 | 采纳 | 三张独立 FTS5 external content 表 + 各表触发器同步，查询 UNION（5.1 FTS 节已明确；outputs 写入路径统一，索引自动刷新） |
+| 5 | pipeline 同步阻塞无异步追踪 | 采纳 | 新增 jobs 表 + POST 立即返回 job_id + 轮询/SSE 端点（D15，6.5 已改） |
+
+### 二、重要设计缺口
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 6 | 产物双写一致性：外部改文件后 DB/FTS 旧 | 采纳 | 读时以文件为准校验 mtime/hash，不一致自动回写 DB 新版本 + FTS（D12 修订，5.3 已改） |
+| 7 | notifications 缺实体关联 | 采纳 | 增加 entity_type/entity_id（5.1/6.6 已改，前端通知可跳转） |
+| 8 | Hermes 生成依赖循环耦合 | 采纳 | 生成编排本地化：ideahub 直调 DeepSeek，不依赖 Hermes 在线；Hermes 仅 QQ 交互层（新增 D14，第 4 节架构已改） |
+| 9 | expire_at 无处理逻辑 | 采纳 | 调度器 tick 自动完成过期任务（move → done + 通知），语义定义见 5.4 |
+| 10 | redo_note 无对应 API | 采纳 | 新增 POST /tasks/{id}/redo（状态→waiting + 清 fail_count + 记录 redo_note），与 reset-failures 语义区分（6.3 已改） |
+
+### 三、次要问题
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 11 | ttl_hours 语义未定义 | 采纳 | 定义为热点时效窗口，expire_at = collected_at + ttl_hours（5.4 已定义） |
+| 12 | outputs PUT 无乐观锁 | 采纳 | PUT 必带 base_version，不匹配返回 409（6.4 已改） |
+| 13 | 无 SSE | 采纳 | jobs/stream SSE 端点 + 前端默认轮询（6.5 已改，标注可选增强） |
+| 14 | content_snapshot 无大小限制 | 采纳 | 截断至 2000 字符（5.4 已改） |
+| 15 | tags.name 无唯一约束 | 采纳 | 加 UNIQUE（5.1 已改） |
+| 16 | discard 热点长期累积 | 采纳 | 保留 7 天，调度器每日清理（5.4 已改） |
+| 17 | settings 并入文件后运行时不可调 | 采纳 | 分层：静态配置入 config 文件，动态参数入 settings 表（D9 修订，5.1 已加 settings 表） |
+| 18 | S1 迁移框架与 D3 混淆 | 采纳 | 注明 schema_version 仅为未来演进预留，本次不迁移数据（5.1 已注） |
+| 19 | Basic Auth 无限流 | 采纳 | 应用层限流 + 登录失败延迟；可升级 Cloudflare Access（6.7/9 已改） |
+| 20 | execute task_ids 可选危险 | 采纳 | task_ids 必填（至少 1 个），执行全部需显式列出（6.5 已改） |
+
+### 四、总体评价采纳
+
+审阅指出"核心风险集中在数据模型字段残留、版本与搜索机制、长任务异步"——三项均已按上述修正落实；决策记录同步更新（D7/D8/D9/D12 修订，新增 D14/D15/D16）。
