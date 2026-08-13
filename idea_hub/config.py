@@ -50,6 +50,17 @@ def load(path: str | None = None) -> Config:
             if key in file_values:
                 values[key] = file_values[key]
 
+        for key in ("port", "rate_limit_per_min"):
+            if key in file_values:
+                file_value = file_values[key]
+                try:
+                    converted_value = int(file_value)
+                except (ValueError, TypeError) as error:
+                    raise ConfigError(f"{key} must be an integer") from error
+                if type(file_value) is not int:
+                    raise ConfigError(f"{key} must be an integer")
+                values[key] = converted_value
+
     environment_overrides = {
         "DEEPSEEK_API_KEY": "deepseek_api_key",
         "IDEAHUB_AUTH_USER": "auth_user",

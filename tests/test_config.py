@@ -89,3 +89,32 @@ def test_env_override_wins_over_yaml(tmp_path, monkeypatch):
     # non-env fields still come from the file
     assert cfg.host == "0.0.0.0"
     assert cfg.port == 9000
+
+
+def test_yaml_port_string_raises_config_error(tmp_path):
+    """A quoted YAML port is rejected as non-integer configuration."""
+    yaml_text = 'auth_user: "admin"\nport: "8000"\n'
+    with pytest.raises(config.ConfigError, match="port must be an integer"):
+        config.load(_write_yaml(tmp_path, yaml_text))
+
+
+def test_yaml_port_null_raises_config_error(tmp_path):
+    """A null YAML port is rejected as non-integer configuration."""
+    yaml_text = 'auth_user: "admin"\nport: null\n'
+    with pytest.raises(config.ConfigError, match="port must be an integer"):
+        config.load(_write_yaml(tmp_path, yaml_text))
+
+
+def test_yaml_rate_limit_string_raises_config_error(tmp_path):
+    """A non-numeric YAML rate limit is rejected as non-integer configuration."""
+    yaml_text = 'auth_user: "admin"\nrate_limit_per_min: "abc"\n'
+    with pytest.raises(config.ConfigError, match="rate_limit_per_min must be an integer"):
+        config.load(_write_yaml(tmp_path, yaml_text))
+
+
+def test_yaml_numeric_port_and_rate_limit_load(tmp_path):
+    """Numeric YAML port and rate limit values load as integers."""
+    yaml_text = 'auth_user: "admin"\nport: 9000\nrate_limit_per_min: 30\n'
+    cfg = config.load(_write_yaml(tmp_path, yaml_text))
+    assert cfg.port == 9000
+    assert cfg.rate_limit_per_min == 30
