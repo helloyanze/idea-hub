@@ -129,7 +129,7 @@ web/
 |---|---|---|
 | `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口（见 5.4） |
 | `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date = DATE(collected_at) 冗余列，专供 discard 清理查询避免函数索引，建 (verdict, collected_date) 联合索引；UNIQUE(source_id, url) 防重复 |
-| `tasks` | id, title, idea_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, idea_path, ai_summary, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4；content_type 枚举与 score_breakdown 格式见 5.4；idea_path = 构思全文落盘路径（相对 base）；产物路径为固定模式 outputs/tasks/<id>/output.md，由 task_id 推导，不存字段 |
+| `tasks` | id, title, idea_summary, ai_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4；content_type 枚举、score_breakdown 格式、idea_summary/ai_summary 语义见 5.4；落盘路径均为固定模式由 task_id 推导（idea: outputs/tasks/<id>/idea.md，output: outputs/tasks/<id>/output.md），不存字段 |
 | `task_links` | task_id, hot_item_id | 多对多关联 |
 | `tags` | id, name UNIQUE, color | name 唯一约束 |
 | `task_tags` | task_id, tag_id | 标签关联 |
@@ -141,7 +141,7 @@ web/
 |---|---|---|
 | `notifications` | id, type, title, body, level, entity_type, entity_id, is_read, created_at | entity_type/entity_id 关联任务/热点，前端可跳转，Hermes 推送可定位 |
 | `outputs` | task_id, version, filename, content, file_mtime, file_hash, created_at, updated_at | (task_id, version) 联合主键，每版本一行；file_mtime/file_hash 供读时校验（见 5.3） |
-| `jobs` | id, type, status, progress, result_ref, error, heartbeat_at, created_at, updated_at | status: pending/running/done/failed；result_ref 为 JSON 字符串；heartbeat_at 供崩溃恢复（见 5.5） |
+| `jobs` | id, type, status, progress, result_ref, error, heartbeat_at, token_used, created_at, updated_at | status: pending/running/done/failed；result_ref 为 JSON 字符串；heartbeat_at 供崩溃恢复（见 5.5）；token_used 统计生成/评分阶段 LLM 消耗（见 5.4） |
 | `schema_version` | version | 迁移版本号（未来 schema 演进用，本次不迁移数据） |
 
 **FTS5 虚拟表（3 张，external content + 触发器）：**
@@ -168,6 +168,7 @@ web/
 - Web 编辑（PUT）/ 上传：写新版本行（version = max+1）+ 更新落盘文件 + FTS 经触发器刷新
 - 外部文件变更检测：读取产物时以文件为准，对比 file_mtime/file_hash，不一致则回写 DB 与 FTS，**不递增版本**（更新当前版本行内容，防编辑器自动保存产生垃圾版本）；不做常驻 watchdog（个人系统，读时校验足够）
 - FTS 索引范围：outputs_fts 仅索引每个 task 的最新版本（触发器判断 version = MAX），FTS 中每个 task 至多一行，避免版本行膨胀与分组复杂度
+- outputs_fts 触发器实现策略（SQLite external content 限制）：AFTER INSERT/UPDATE 时先按 task_id 删除该 task 旧 FTS 行（external content 表的 DELETE 需携带旧内容，实现时用先删后插两段式），再 INSERT 最新版本行；AFTER DELETE 触发器同步删除对应 FTS 行
 
 ### 5.4 字段语义
 
@@ -177,12 +178,18 @@ web/
 - `hot_items` 清理策略：discard 热点保留 7 天，调度器每日清理（删行 + FTS 触发器同步）
 - `tasks.content_type` 枚举：article（文章，默认）/ video_script（视频脚本）/ tweet（短文）/ newsletter（简报）；生成时由 LLM 根据热点类型与 target_desc 判定，手动建任务可指定
 - `tasks.score_breakdown`：JSON 字符串，多维评分明细，如 {"facts": 8, "verification": 7, "timeliness": 9, "value": 8}（维度随目标可配）；feasibility_score = 各维度加权均值（四舍五入）
+- `tasks.idea_summary`：生成阶段 LLM 产出的一句话摘要（构思主题）；`tasks.ai_summary`：执行完成后 AI 对成文的总结（文章要点）；两者均入 FTS 索引
+- idea 文件管理：构思全文落盘 outputs/tasks/<id>/idea.md（固定模式），由 generate 服务（S4）随任务创建时写入；不版本化、不做外部变更检测（只读中间产物）
+- `notifications.type` 枚举：collect_done / generate_done / execute_done / job_failed / task_expired / budget_exceeded / discard_cleaned（可扩展）
+- `notifications.level` 枚举：info / warn / error；前端角标颜色：info 蓝 / warn 黄 / error 红
+- `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零；生成/评分阶段 token 计入 jobs.token_used；stats 汇总 = SUM(tasks.token_used) + SUM(jobs.token_used)
 
 ### 5.5 异步 job 生命周期
 
 - 状态流转：pending → running → done/failed
 - 心跳：子步骤边界更新（每处理完一个 candidate / 一篇产物 / 一个来源）及每次 LLM 尝试前；LLM 单次超时 90s、最多重试 2 次（共 3 次尝试，最坏 270s < 300s 阈值），每次尝试前刷新心跳；stale 阈值 5min
 - 崩溃恢复：调度器 tick 发现 running 且 heartbeat_at 超过 5 分钟未更新 → 标记 failed + 写通知
+- 崩溃恢复并发安全：标记 failed 用条件 UPDATE（WHERE status='running' AND heartbeat_at < 阈值），rowcount=0 则跳过（job 可能已恢复或已结束），与 6.8 原子变更一致
 - job 去重：同类型 job 已有 running 时，POST 返回已有 job_id（不新建）
 - result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
 
@@ -200,6 +207,8 @@ POST   /api/v1/sources/{id}/toggle    # 启停
 DELETE /api/v1/sources/{id}             # 仅允许无关联 hot_items 的来源；有关联返回 409（应改用 toggle 禁用）
 POST   /api/v1/sources/{id}/test      # 测试抓取（验证渠道可用性）
 ```
+
+test 响应：{ok: bool, item_count: int, sample_items: [...], error?: string}——ok=false 时 error 说明失败原因（网络/解析/鉴权），前端展示抓取条目数与示例。
 
 ### 6.2 hotspots
 
@@ -221,8 +230,8 @@ DELETE /api/v1/tasks/{id}                    # 级联：删 task_links、task_ta
 POST   /api/v1/tasks/{id}/move      {to_status}
 PUT    /api/v1/tasks/{id}/tags      {tag_ids}    # 替换语义：设置任务全部标签（重传完整数组）
 POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）
-POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）
-POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数（区别于 redo：不改变状态）
+POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：仅限 done/failed（已执行过）；status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）；其他状态 409
+POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数：仅限 fail_count > 0；其他 409（区别于 redo：不改变状态）
 ```
 
 ### 6.4 outputs
@@ -251,13 +260,15 @@ GET  /api/v1/jobs/stream?type=                # SSE 全局推送（按 type 过�
 
 ```
 GET  /api/v1/stats                           # 队列计数 + token 用量 + 今日产出 + 活跃 job
-GET  /api/v1/notifications?unread_only=&entity_type=&entity_id=
+GET  /api/v1/notifications?unread_only=&entity_type=&entity_id=&type=
 POST /api/v1/notifications/{id}/read
 POST /api/v1/notifications/read-all
 GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 GET /api/v1/settings                     # 全部动态参数（评分阈值、收集频率、每日预算上限等）
 PUT /api/v1/settings  {key: value}       # 更新单键（按 value_type 校验 int/float/string/json）
 ```
+
+settings 校验失败响应：400 + {error: {code: "INVALID_SETTING_VALUE", message}}，与全局错误格式一致。
 
 ### 6.7 统一搜索
 
@@ -276,6 +287,9 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - 乐观锁：outputs PUT 必须带 base_version
 - 限流：应用层请求频率限制 + 登录失败延迟；文档注明可升级 Cloudflare Access
 - 原子状态变更：所有任务状态变更（move / execute / redo / 过期完成）用条件 UPDATE（WHERE status IN 允许前置状态），rowcount=0 视为冲突返回 409，杜绝调度器 tick 与 API 并发竞态
+- job 去重粒度：type 级别（不区分候选集）；generate 显式传 hotspot_ids 在已有 running generate job 时同样返回已有 job_id，不享受例外
+- execute 幂等兜底：执行器启动前检查 outputs 表——该 task 已有产物行且 status=done → 跳过（视为已执行）；status=done 但无产物（手动移入）→ 允许执行；redo 重置状态后重新可执行
+- DELETE source 并发安全：检查关联 → 删除在事务内完成（BEGIN IMMEDIATE check-then-delete）；collect job 仅处理 enabled=1 的来源（删除前需先 toggle 禁用，天然避免写入竞态）
 
 ## 7. 前端设计
 
@@ -315,6 +329,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 
 - 看板列数据独立拉取、卡片组件 memo 化、拖拽不整页重渲染
 - 交互目标：点击无感知延迟
+- done 列加载策略：默认仅加载最近 50 条（completed_at 降序）+ "加载更多"分页；拖拽到 done 的新任务乐观插入列顶；其余列数量少，全量加载
 
 ### 7.6 移动端
 
@@ -345,6 +360,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 ## 10. 测试策略
 
 - 后端：pytest + 内存 SQLite；每切片配套服务层单测 + API 集成测试（jobs 异步、FTS 搜索、版本乐观锁、过期处理、读时校验必测）
+- discard 清理测试必覆盖：删 hot_items 行后 FTS 索引同步清除、搜索不返回已删除结果（S7 验收）
 - 前端：Vitest + React Testing Library；核心交互必须有测试（看板拖拽、评分组件、编辑器、job 轮询）
 - e2e：保留一条核心链路测试（收集→评分→生成→执行→产物）
 - 回归审阅：实施完经外部 AI 审阅，逐条回应采纳/不采纳并记录
@@ -419,7 +435,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 2 | 过期未区分状态，in_progress 与执行器冲突 | 采纳 | 过期自动完成仅作用于 todo/waiting；in_progress 跳过 + 警告通知（5.2/5.4 已改） |
 | 3 | result_ref 语义不明 | 采纳 | 明确为 JSON 字符串：{"task_ids":[...]}/{"hotspot_count":N}（5.5 已定义） |
 | 4 | 无崩溃恢复，running 卡死 | 采纳 | jobs 加 heartbeat_at；调度器检测超时（>5min）标记 failed + 通知（5.5 已改） |
-| 5 | outputs_fts 版本行重复命中 | 采纳 | 搜索结果按 task_id 分组，默认最新版本，标注历史版本命中数（S6 实现） |
+| 5 | outputs_fts 版本行重复命中 | 采纳（后被第四轮 #13 修订） | 原方案为查询时按 task_id 分组；第四轮 #13 改为索引时过滤——FTS 仅索引每 task 最新版本（5.3），取代查询时分组，避免 rank 精度损失 |
 | 6 | redo 不接受请求体 | 采纳 | 接受可选 {note?: string}，redo_note 存时间戳+备注（6.3 已改） |
 | 7 | ttl_hours 修改影响历史 | 采纳 | 注明动态计算影响全部历史热点（5.4 已注） |
 | 8 | hot_items 去重未定义 | 采纳 | UNIQUE(source_id, url) + 服务层 URL 去重（5.1 已改） |
@@ -476,3 +492,43 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 20 | api/hooks.ts 过于集中 | 采纳 | 按领域拆分为 api/hooks/ 目录（4.2 已改） |
 
 审阅总结中"硬伤"（#5/#6/#7/#10/#11）、"模糊"（#2/#8/#9/#12/#17/#18）、"运行时风险"（#13/#14/#16）全部按上表落实。
+
+### 第五轮审阅回应（2026-08-14）
+
+一、内部不一致：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | 第二轮 #5 与 5.3 矛盾未清理 | 采纳 | 第二轮 #5 记录更新，注明被第四轮 #13 修订为索引时过滤（已改） |
+| 2 | idea_path 路径格式未定义 | 采纳 | 删除 idea_path 字段：构思全文固定模式 outputs/tasks/<id>/idea.md，与产物路径对称（5.1 已改） |
+| 3 | ai_summary 与 idea_summary 区别未说明 | 采纳 | idea_summary = 生成阶段一句话摘要；ai_summary = 执行后成文总结；均入 FTS（5.4 已改） |
+| 4 | redo 前置状态缺失 | 采纳 | redo 仅限 done/failed，其他状态 409（6.3 已改） |
+| 5 | reset-failures 前置状态缺失 | 采纳 | 仅限 fail_count > 0，其他 409（6.3 已改） |
+
+二、设计缺口：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 6 | outputs_fts 触发器实现受 SQLite external content 限制 | 采纳 | 注明先删后插两段式策略（按 task_id 删旧行再插新行），AFTER DELETE 同步删 FTS（5.3 已改） |
+| 7 | generate job 去重粒度未说明 | 采纳 | 去重为 type 级别，显式 hotspot_ids 不享受例外（6.8 已改） |
+| 8 | execute 幂等兜底未定义 | 采纳 | 执行器检查 outputs 表 + status：有产物且 done 跳过；done 无产物允许执行；redo 后重新可执行（6.8 已改） |
+| 9 | idea_path 写入时机未说明 | 采纳 | 与 #2 合并：字段删除；idea.md 由 generate 服务随任务创建写入，不版本化（5.4 已改） |
+| 10 | settings 校验失败响应未定义 | 采纳 | 400 + INVALID_SETTING_VALUE，与全局错误格式一致（6.6 已改） |
+| 11 | sources test 响应格式未定义 | 采纳 | {ok, item_count, sample_items, error?}（6.1 已改） |
+
+三、潜在运行时问题：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 12 | DELETE source 409 检查竞态 | 采纳 | 事务内 check-then-delete + collect 仅处理 enabled 来源（6.8 已改） |
+| 13 | 调度器 failed 标记与 job 写回并发 | 采纳 | failed 标记用条件 UPDATE（status='running' AND heartbeat_at < 阈值），rowcount=0 跳过（5.5 已改） |
+| 14 | done 列分页策略缺失 | 采纳 | 默认加载最近 50 条 + 加载更多；拖拽乐观插入列顶（7.5 已改） |
+
+四、细微问题：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 15 | notifications.type 枚举未定义 | 采纳 | collect_done/generate_done/execute_done/job_failed/task_expired/budget_exceeded/discard_cleaned；查询端点加 type= 过滤（5.4/6.6 已改） |
+| 16 | notifications.level 枚举未定义 | 采纳 | info/warn/error，前端角标蓝/黄/红（5.4 已改） |
+| 17 | token_used 统计口径未说明 | 采纳 | 执行阶段累计、redo 累加不清零；生成/评分计入 jobs.token_used；stats = SUM(tasks)+SUM(jobs)（5.4 已改） |
+| 18 | discard 清理的 FTS 测试未覆盖 | 采纳 | 单测必覆盖：删 hot_items 后 FTS 同步清除、搜索不返回已删结果（10 已改） |
