@@ -72,6 +72,18 @@ def test_init_schema_idempotent(tmp_path):
     assert n == len(EXPECTED_SETTINGS)
 
 
+def test_sources_type_has_no_check_constraint(conn):
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'"
+    ).fetchone()[0]
+    assert "CHECK (type IN" not in sql
+    conn.execute(
+        "INSERT INTO sources (type, name, url) VALUES ('custom-channel', 'x', 'http://x')"
+    )
+    conn.commit()
+    assert conn.execute("SELECT count(*) FROM sources").fetchone()[0] == 1
+
+
 # ---------- settings 种子 ----------
 
 def test_settings_seeded(conn):
