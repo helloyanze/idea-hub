@@ -138,13 +138,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE hot_items ADD COLUMN {col} REAL NOT NULL DEFAULT {dflt}"
                          if col != "review_status" else
                          f"ALTER TABLE hot_items ADD COLUMN {col} TEXT NOT NULL DEFAULT {dflt}")
-    # tasks.content_type 旧列（content_types 方案残留）——若存在则删除
-    tcols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-    if "content_type" in tcols:
-        try:
-            conn.execute("ALTER TABLE tasks DROP COLUMN content_type")
-        except sqlite3.OperationalError:
-            pass  # 旧版 SQLite 不支持 DROP COLUMN，保留无害
+    # tasks.content_type 旧列（content_types 方案残留）——v2 起 content_type 成为正式字段，
+    # 不再删除（旧 DROP 逻辑会与 _migrate_v2 新增列冲突，导致每次启动重置 content_type）
     # 旧 content_types 表（早期方案残留）——若存在则重命名为 tags 并转移数据
     has_ct = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_types'").fetchone()[0]
     if has_ct:
@@ -164,6 +159,45 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ("工具", "实用工具与产品"),
             ("行业观察", "行业动态与商业分析"),
         ])
+    _migrate_v2(conn)  # v2：自动执行调度字段 + notifications 表 + expire_at 回填（幂等）
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """v2: 自动执行调度（content_type/is_complex/fail_count/expire_at/token_used/redo_note,
+    sources.ttl_hours, settings 调度配置, notifications 表, expire_at 回填）。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "content_type" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN content_type TEXT DEFAULT 'long'")
+        conn.execute("ALTER TABLE tasks ADD COLUMN is_complex INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE tasks ADD COLUMN fail_count INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE tasks ADD COLUMN last_fail_reason TEXT")
+        conn.execute("ALTER TABLE tasks ADD COLUMN expire_at TEXT")
+        conn.execute("ALTER TABLE tasks ADD COLUMN token_used INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE tasks ADD COLUMN redo_note TEXT")
+    scol = {r["name"] for r in conn.execute("PRAGMA table_info(sources)").fetchall()}
+    if "ttl_hours" not in scol:
+        conn.execute("ALTER TABLE sources ADD COLUMN ttl_hours INTEGER DEFAULT 24")
+    defaults = {
+        "auto_execute": "1", "max_concurrent": "1", "max_fail_count": "3",
+        "stale_simple_min": "5", "stale_complex_min": "60",
+        "max_daily_tokens": "500000", "last_scheduler_tick": "",
+        "ai_taste_blacklist": "首先,其次,最后,总的来说,值得注意的是,综上所述,众所周知,不言而喻,赋能,抓手,闭环",
+    }
+    for k, v in defaults.items():
+        if conn.execute("SELECT 1 FROM settings WHERE key=?", (k,)).fetchone() is None:
+            conn.execute("INSERT INTO settings (key, value) VALUES (?,?)", (k, v))
+    conn.execute("""CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER, type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+        is_read INTEGER DEFAULT 0, created_at TEXT NOT NULL)""")
+    # expire_at 回填：有关联热点且热点有 ttl_hours
+    # 注：sqlite datetime() 输出 'YYYY-MM-DD HH:MM:SS'（空格分隔），统一替换为 ISO 'T' 分隔，
+    # 与 create_task 写入的 expire_at 格式保持一致（测试断言 '2026-08-14T00:00:00'）
+    conn.execute("""UPDATE tasks SET expire_at = (
+            SELECT replace(datetime(h.collected_at, '+' || s.ttl_hours || ' hours'), ' ', 'T')
+            FROM hot_items h JOIN sources s ON s.id = h.source_id
+            WHERE h.id = tasks.hot_item_id AND s.ttl_hours IS NOT NULL)
+        WHERE expire_at IS NULL AND hot_item_id IS NOT NULL""")
+    conn.commit()
 
 def backup_db(conn: sqlite3.Connection, backups_dir: str) -> str:
     pathlib.Path(backups_dir).mkdir(parents=True, exist_ok=True)
