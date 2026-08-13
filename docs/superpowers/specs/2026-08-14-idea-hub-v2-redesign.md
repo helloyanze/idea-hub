@@ -128,12 +128,12 @@ web/
 | 表 | 字段要点 | 说明 |
 |---|---|---|
 | `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口（见 5.4） |
-| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date 用于 discard 清理 |
+| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date 用于 discard 清理；UNIQUE(source_id, url) 防重复 |
 | `tasks` | id, title, idea_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, idea_path, output_path, ai_summary, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4 |
 | `task_links` | task_id, hot_item_id | 多对多关联 |
 | `tags` | id, name UNIQUE, color | name 唯一约束 |
 | `task_tags` | task_id, tag_id | 标签关联 |
-| `settings` | key TEXT PRIMARY KEY, value | 动态参数：score_todo_threshold、collect_interval_hours、daily_budget_tokens 等（见 D9） |
+| `settings` | key TEXT PRIMARY KEY, value, value_type | 动态参数：score_todo_threshold、collect_interval_hours、daily_budget_tokens 等（见 D9）；value_type: int/float/string/json |
 
 **新表（4 张）：**
 
@@ -141,7 +141,7 @@ web/
 |---|---|---|
 | `notifications` | id, type, title, body, level, entity_type, entity_id, is_read, created_at | entity_type/entity_id 关联任务/热点，前端可跳转，Hermes 推送可定位 |
 | `outputs` | task_id, version, filename, content, file_mtime, file_hash, created_at, updated_at | (task_id, version) 联合主键，每版本一行；file_mtime/file_hash 供读时校验（见 5.3） |
-| `jobs` | id, type, status, progress, result_ref, error, created_at, updated_at | status: pending/running/done/failed；长任务异步追踪（见 D15） |
+| `jobs` | id, type, status, progress, result_ref, error, heartbeat_at, created_at, updated_at | status: pending/running/done/failed；result_ref 为 JSON 字符串；heartbeat_at 供崩溃恢复（见 5.5） |
 | `schema_version` | version | 迁移版本号（未来 schema 演进用，本次不迁移数据） |
 
 **FTS5 虚拟表（3 张，external content + 触发器）：**
@@ -159,7 +159,7 @@ web/
 - 四状态：`todo`（待办）/ `waiting`（等待）/ `in_progress`（进行中）/ `done`（已完成）
 - 状态变更仅通过 move 操作；进入 done 时记录 completed_at
 - 无 archived 状态：完成任务停留在 done；低分（< 阈值）直接 discard，不创建任务
-- 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 move 到 done，备注"已过期"并写通知
+- 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 move 到 done，备注"已过期"并写通知；仅作用于 todo / waiting，in_progress 任务跳过并发警告（避免与执行器写回冲突）
 
 ### 5.3 产出双写与一致性
 
@@ -170,10 +170,18 @@ web/
 
 ### 5.4 字段语义
 
-- `sources.ttl_hours`：该来源热点的时效窗口（小时）。热点 expire_at = collected_at + ttl_hours；过期热点不再作为生成候选；不参与删除（保留历史）
-- `tasks.expire_at`：任务时效。过期任务由调度器自动完成（move → done + 通知）；人工操作不受限
+- `sources.ttl_hours`：该来源热点的时效窗口（小时）。热点 expire_at = collected_at + ttl_hours（动态计算，不落库）；过期热点不再作为生成候选；不参与删除（保留历史）。注意：修改 ttl_hours 会影响该来源全部历史热点的时效判定
+- `tasks.expire_at`：任务时效。过期任务由调度器自动完成（move → done + 通知），仅限 todo/waiting；in_progress 跳过并发警告；人工操作不受限
 - `hot_items.content_snapshot`：截断至 2000 字符，防长文膨胀 FTS 索引
 - `hot_items` 清理策略：discard 热点保留 7 天，调度器每日清理（删行 + FTS 触发器同步）
+
+### 5.5 异步 job 生命周期
+
+- 状态流转：pending → running → done/failed
+- 心跳：job 运行期间每 30s 更新 heartbeat_at
+- 崩溃恢复：调度器 tick 发现 running 且 heartbeat_at 超过 5 分钟未更新 → 标记 failed + 写通知
+- job 去重：同类型 job 已有 running 时，POST 返回已有 job_id（不新建）
+- result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
 
 ## 6. API 设计（/api/v1）
 
@@ -208,7 +216,7 @@ DELETE /api/v1/tasks/{id}
 POST   /api/v1/tasks/{id}/move      {to_status}
 POST   /api/v1/tasks/{id}/tags      {tag_ids}
 POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）
-POST   /api/v1/tasks/{id}/redo              # 重做已完成任务：status→waiting、fail_count 清零、记录 redo_note
+POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）
 POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数（区别于 redo：不改变状态）
 ```
 
@@ -229,7 +237,8 @@ POST /api/v1/generate                         # 生成 idea（本地 LLM），�
 POST /api/v1/execute    {task_ids: []}        # task_ids 必填（至少 1 个）；执行全部需显式列出
 GET  /api/v1/jobs/{job_id}                    # 查询进度 {status, progress, result_ref, error}
 GET  /api/v1/jobs?type=&status=&page=         # 任务列表
-GET  /api/v1/jobs/stream                      # SSE 推送 job 进度（可选增强，前端默认轮询）
+GET  /api/v1/jobs/{job_id}/stream             # SSE 单 job 进度订阅（可选增强，前端默认轮询）
+GET  /api/v1/jobs/stream?type=                # SSE 全局推送（按 type 过滤，可选）
 ```
 
 ### 6.6 stats / notifications / health
@@ -245,7 +254,7 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 ### 6.7 统一约定
 
 - 长任务端点一律异步：立即返回 job_id，不阻塞 HTTP 请求
-- 写操作幂等：collect/generate/execute 重复触发不重复产出（job 去重 + 执行器幂等）
+- 写操作幂等：collect/generate/execute 重复触发不重复产出（同类型 running job 去重，返回已有 job_id；执行器幂等兜底）
 - 乐观锁：outputs PUT 必须带 base_version
 - 限流：应用层请求频率限制 + 登录失败延迟；文档注明可升级 Cloudflare Access
 
@@ -278,7 +287,7 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 
 ### 7.4 长任务交互
 
-- 触发收集/生成/执行后：页面显示 job 进度条（React Query 轮询 jobs/{id}，或 SSE 订阅）
+- 触发收集/生成/执行后：页面显示 job 进度条（React Query 轮询 jobs/{id}，或 SSE 订阅 jobs/{id}/stream，仅订阅自己触发的 job）
 - 任务完成/失败 toast 提示；失败可查看 error 详情与重试
 
 ### 7.5 性能目标
@@ -380,3 +389,18 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 ### 四、总体评价采纳
 
 审阅指出"核心风险集中在数据模型字段残留、版本与搜索机制、长任务异步"——三项均已按上述修正落实；决策记录同步更新（D7/D8/D9/D12 修订，新增 D14/D15/D16）。
+
+### 第二轮审阅回应（2026-08-14）
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | jobs/stream 缺 job_id 定位，前端收到无关事件 | 采纳 | 单 job 订阅 GET /jobs/{job_id}/stream；全局推送另设 /jobs/stream?type=（6.5 已改） |
+| 2 | 过期未区分状态，in_progress 与执行器冲突 | 采纳 | 过期自动完成仅作用于 todo/waiting；in_progress 跳过 + 警告通知（5.2/5.4 已改） |
+| 3 | result_ref 语义不明 | 采纳 | 明确为 JSON 字符串：{"task_ids":[...]}/{"hotspot_count":N}（5.5 已定义） |
+| 4 | 无崩溃恢复，running 卡死 | 采纳 | jobs 加 heartbeat_at；调度器检测超时（>5min）标记 failed + 通知（5.5 已改） |
+| 5 | outputs_fts 版本行重复命中 | 采纳 | 搜索结果按 task_id 分组，默认最新版本，标注历史版本命中数（S6 实现） |
+| 6 | redo 不接受请求体 | 采纳 | 接受可选 {note?: string}，redo_note 存时间戳+备注（6.3 已改） |
+| 7 | ttl_hours 修改影响历史 | 采纳 | 注明动态计算影响全部历史热点（5.4 已注） |
+| 8 | hot_items 去重未定义 | 采纳 | UNIQUE(source_id, url) + 服务层 URL 去重（5.1 已改） |
+| 9 | job 去重机制未说明 | 采纳 | 同类型 running 存在时返回已有 job_id（5.5/6.7 已改） |
+| 10 | settings.value 无类型 | 采纳 | 加 value_type 列（int/float/string/json）（5.1 已改） |
