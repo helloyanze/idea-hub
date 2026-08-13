@@ -431,6 +431,8 @@ function md(s) {
 function openModal(sel) { $(sel).classList.add("show"); }
 function closeModal(sel) { $(sel).classList.remove("show"); }
 
+let editingSourceId = null;
+
 function renderSources() {
   const list = $("#sourceList");
   list.innerHTML = "";
@@ -442,9 +444,25 @@ function renderSources() {
     row.innerHTML = `
       <span class="type-badge ${cls}">${label}</span>
       <div class="grow"><div class="name">${esc(s.name)}</div>
-        <div class="kw">${s.keywords ? "关键词：" + esc(s.keywords) : "无关键词过滤"}</div></div>
+        <div class="kw">${s.keywords ? "关键词：" + esc(s.keywords) : "无关键词过滤"} · 时效 ${s.ttl_hours || 24}h</div></div>
+      <button class="mini" data-edit title="编辑来源">编辑</button>
       <div class="switch ${s.enabled ? "on" : ""}" data-toggle><span class="track"></span></div>
       <button class="mini danger" data-del>删除</button>`;
+    row.querySelector("[data-edit]").addEventListener("click", () => {
+      editingSourceId = s.id;
+      const f = list.querySelector(".add-card");
+      f.querySelector("#src-type").value = s.type;
+      f.querySelector("#src-name").value = s.name;
+      f.querySelector("#src-url").value = s.url;
+      f.querySelector("#src-items-path").value = s.items_path || "data";
+      f.querySelector("#src-title-field").value = s.title_field || "title";
+      f.querySelector("#src-keywords").value = s.keywords || "";
+      f.querySelector("#src-ttl").value = s.ttl_hours || 24;
+      const btn = f.querySelector("#src-add-btn");
+      btn.textContent = "保存修改";
+      btn.scrollIntoView({block: "nearest"});
+      toast(`正在编辑：${s.name}`, "ok");
+    });
     row.querySelector("[data-toggle]").addEventListener("click", async e => {
       await api.post(`/api/sources/${s.id}/toggle`);
       s.enabled = !s.enabled;
@@ -469,18 +487,27 @@ function renderSources() {
     <input id="src-items-path" placeholder="条目路径（默认 data）">
     <input id="src-title-field" placeholder="标题字段（默认 title）">
     <input id="src-keywords" class="full" placeholder="关键词白名单（逗号分隔，可留空）">
+    <input id="src-ttl" type="number" min="1" placeholder="时效小时（默认 24）">
     <button class="btn primary" id="src-add-btn" style="grid-column:1/-1;justify-content:center">添加</button>`;
   add.querySelector("#src-add-btn").addEventListener("click", async () => {
     const name = add.querySelector("#src-name").value.trim();
     const url = add.querySelector("#src-url").value.trim();
     if (!name || !url) { toast("名称和 URL 必填", "err"); return; }
-    await api.post("/api/sources", {
+    const body = {
       type: add.querySelector("#src-type").value, name, url,
       items_path: add.querySelector("#src-items-path").value || "data",
       title_field: add.querySelector("#src-title-field").value || "title",
       keywords: add.querySelector("#src-keywords").value || "",
-    });
-    toast("已添加来源", "ok");
+      ttl_hours: parseInt(add.querySelector("#src-ttl").value, 10) || 24,
+    };
+    if (editingSourceId !== null) {
+      await api.patch(`/api/sources/${editingSourceId}`, body);
+      toast("已保存修改", "ok");
+      editingSourceId = null;
+    } else {
+      await api.post("/api/sources", body);
+      toast("已添加来源", "ok");
+    }
     SOURCES = (await api.get('/api/sources')).items;
     renderSources();
   });
@@ -752,6 +779,56 @@ $("#btn-more").addEventListener("click", e => {
 $("#more-source").addEventListener("click", () => { moreMenu.hidden = true; renderSources(); openModal("#sourceModal"); });
 $("#more-tag").addEventListener("click", () => { moreMenu.hidden = true; renderTags(); openModal("#tagModal"); });
 $("#more-collect").addEventListener("click", () => { moreMenu.hidden = true; $("#collectBtn").click(); });
+
+/* 立即生成（提示候选与生成流程；真实生成由 Hermes agent 流程执行） */
+$("#generateBtn").addEventListener("click", async () => {
+  const b = $("#generateBtn");
+  b.disabled = true;
+  try {
+    const r = await api.post("/api/generate");
+    if (r && r.candidate_count !== undefined) {
+      toast(`待生成候选 ${r.candidate_count} 条。idea 生成由 AI 流程执行（每晚自动或云端手动触发）`, "ok");
+    } else {
+      toast("已触发，结果请查看候选列表", "ok");
+    }
+  } catch (err) {
+    toast("生成检查失败：" + err.message, "err");
+  } finally {
+    b.disabled = false;
+  }
+});
+
+/* 新建目标模式 */
+$("#addTargetBtn").addEventListener("click", () => {
+  $("#tg-name").value = ""; $("#tg-desc").value = ""; $("#tg-dims").value = "";
+  openModal("#targetModal");
+});
+$("#tg-save").addEventListener("click", async () => {
+  const name = $("#tg-name").value.trim();
+  if (!name) { toast("目标名称必填", "err"); return; }
+  let dims = $("#tg-dims").value.trim();
+  if (dims) {
+    try { JSON.parse(dims); } catch (e) { toast("评分维度不是合法 JSON", "err"); return; }
+  } else {
+    dims = "{}";
+  }
+  try {
+    const r = await api.post("/api/targets", {
+      name, description: $("#tg-desc").value.trim(), score_dimensions: dims,
+    });
+    closeModal("#targetModal");
+    await loadAll();
+    if (r && r.id) {
+      await api.post(`/api/targets/${r.id}/activate`);
+      await loadAll();
+      toast(`目标「${name}」已创建并激活`, "ok");
+    } else {
+      toast("目标已创建", "ok");
+    }
+  } catch (err) {
+    toast("创建失败：" + err.message, "err");
+  }
+});
 document.addEventListener("click", e => {
   if (!moreMenu.hidden && !e.target.closest("#btn-more") && !e.target.closest("#moreMenu")) moreMenu.hidden = true;
 });

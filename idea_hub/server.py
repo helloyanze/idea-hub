@@ -59,6 +59,16 @@ class SourceIn(BaseModel):
     items_path: str = "data"
     title_field: str = "title"
     keywords: str = ""
+    ttl_hours: int = 24
+
+class SourcePatchIn(BaseModel):
+    type: str | None = None
+    name: str | None = None
+    url: str | None = None
+    items_path: str | None = None
+    title_field: str | None = None
+    keywords: str | None = None
+    ttl_hours: int | None = None
 
 class TagIn(BaseModel):
     name: str
@@ -237,6 +247,20 @@ def create_app(db_path: str) -> FastAPI:
             if not src: raise HTTPException(404, "source not found")
             models.set_source_enabled(c, source_id, not src["enabled"])
             return {"ok": True}
+
+    @app.patch("/api/sources/{source_id}")
+    def update_source(source_id: int, body: SourcePatchIn):
+        # 用模块级 DB_PATH（同 Task 8 新端点模式），测试可 monkeypatch 指向临时库
+        conn = db.connect(DB_PATH)
+        try:
+            try:
+                models.update_source(conn, source_id, **body.model_dump())
+            except ValueError:
+                raise HTTPException(404, "source not found")
+            src = next((s for s in models.list_sources(conn) if s["id"] == source_id), None)
+            return src
+        finally:
+            conn.close()
 
     @app.delete("/api/sources/{source_id}")
     def delete_source(source_id: int):

@@ -122,6 +122,29 @@ def set_source_enabled(conn, source_id, enabled):
     conn.execute("UPDATE sources SET enabled=? WHERE id=?", (1 if enabled else 0, source_id))
     conn.commit()
 
+_SOURCE_FIELDS = ("type", "name", "url", "enabled", "items_path", "title_field",
+                  "keywords", "ttl_hours")
+
+def update_source(conn, source_id, **fields):
+    """部分更新来源字段：白名单字段，None 值跳过（不覆盖）。返回受影响行数。"""
+    try:
+        exists = conn.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone()
+    except sqlite3.OperationalError:
+        exists = None
+    if not exists:
+        raise ValueError(f"source {source_id} not found")
+    sets, args = [], []
+    for k in _SOURCE_FIELDS:
+        if k in fields and fields[k] is not None:
+            v = fields[k]
+            if k == "enabled":
+                v = 1 if v else 0
+            sets.append(f"{k}=?")
+            args.append(v)
+    if sets:
+        conn.execute(f"UPDATE sources SET {', '.join(sets)} WHERE id=?", (*args, source_id))
+        conn.commit()
+
 def get_setting(conn, key, default=None):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default

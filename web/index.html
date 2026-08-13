@@ -28,6 +28,7 @@
 
   <div class="group view">
     <select class="select" id="goalSelect" title="目标切换"></select>
+    <button class="btn mini-add" id="addTargetBtn" title="新建目标模式">+ 目标</button>
     <select class="select" id="tagFilter" title="标签过滤"><option value="">全部标签</option></select>
   </div>
 
@@ -43,6 +44,9 @@
   <div class="group action">
     <button class="btn primary" id="collectBtn">
       <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>立即收集
+    </button>
+    <button class="btn" id="generateBtn" title="查看待生成候选并提示生成流程">
+      <svg viewBox="0 0 24 24" style="width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8"><path d="M12 2v4m0 12v4M2 12h4m12 0h4M5 5l2.8 2.8m8.4 8.4L19 19M19 5l-2.8 2.8M7.8 16.2 5 19"/></svg>立即生成
     </button>
     <div class="switch on" id="autoSwitch" title="每晚自动运行">
       <span>自动运行</span>
@@ -153,6 +157,26 @@
     <div class="m-foot">
       <button class="btn" data-close>关闭</button>
       <button class="btn primary" id="addTag">+ 添加标签</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 目标模式弹窗 ===================== -->
+<div class="modal" id="targetModal">
+  <div class="scrim2" data-close></div>
+  <div class="box" style="width:460px">
+    <div class="m-head"><h3>新建目标模式</h3><button class="dr-close" data-close><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="m-body">
+      <label class="t-label">名称</label>
+      <input id="tg-name" class="full" placeholder="如：自媒体内容">
+      <label class="t-label">描述（指导 AI 生成 idea）</label>
+      <input id="tg-desc" class="full" placeholder="如：面向普通读者的深度文章">
+      <label class="t-label">评分维度（JSON，可选）</label>
+      <input id="tg-dims" class="full" placeholder='如 {"热度":8,"相关性":7,"可执行性":6,"预期价值":7}，留空用默认'>
+    </div>
+    <div class="m-foot">
+      <button class="btn" data-close>取消</button>
+      <button class="btn primary" id="tg-save">创建并激活</button>
     </div>
   </div>
 </div>
