@@ -1,8 +1,9 @@
 # Idea Hub 自动执行调度设计规格
 
 > 日期：2026-08-13
-> 状态：草稿（待审阅）
+> 状态：修订版 v2（已吸收外部审阅意见，待用户确认）
 > 关联文档：`2026-08-11-idea-queue-design.md`（初版设计规格，已批准）
+> 审阅依据：`Idea-Hub-产品与技术审阅报告.md`（2026-08-13，外部审阅，可信度 8/10）
 > 范围：本次迭代聚焦"自动调度任务开始运行并产出内容"的闭环，是对初版规格执行链路的补全与重构
 
 ---
@@ -32,16 +33,17 @@ Idea Hub 每日自动从多个来源收集热点，经过规则过滤与 AI 评�
 早晨：QQ/Web 查看昨晚自动收集生成的新 idea（待办/留档）
 白天：有空时挑选感兴趣的 idea，拖入等待队列（人只做这一步）
 全天：系统每 5 分钟自动检查等待队列，有任务就执行产出
-执行完成：QQ 收到通知（任务名 + 摘要 + 产出位置）
-不满意：手动打回重做，附修改意见
+执行完成：QQ 收到通知（任务名 + 摘要 + 产出位置），Web 端亦有未读标记
+不满意：手动打回重做，附修改意见；旧版产出保留可对比
 ```
 
 ### 1.4 核心目标
 
 1. **自动闭环**：从热点收集、idea 生成、人挑选、自动执行到产出通知，全链路自动运转，人只做挑选与质量把关。
 2. **准实时调度**：任务进入等待队列后尽快开始执行（分钟级延迟），不做每日批量。
-3. **成本可控**：常规任务走轻量 API 直出，复杂任务才动用 agent 深度执行，避免每篇内容都付出 agent 级成本。
-4. **稳定自愈**：调度无状态、崩溃自愈、失败可重试、卡死可回收，不需要人工值守。
+3. **成本可控且可见**：常规任务走轻量 API 直出，复杂任务才动用 agent；每次执行记录 token 消耗，有每日预算上限。
+4. **质量有保障**：产出经过轻量质检，不合格自动重试，避免"自动产出垃圾"。
+5. **稳定自愈**：调度无状态、崩溃自愈、失败可重试、卡死可回收、调度器健康可监控，不需要人工值守。
 
 ---
 
@@ -87,6 +89,7 @@ Hermes agent：pending-executions 列请求 → next --task-id 定向领取
 | 4 | **无失败恢复** | Hermes agent 中途挂掉/超时，任务卡在 in_progress 无法恢复；失败任务退回 waiting 后不自动重试（也无重试上限，理论上可无限重试） |
 | 5 | **产出形态单一** | 所有任务统一按"文章"执行，无内容类型概念（短文/长文/视频脚本） |
 | 6 | **无完成通知** | 执行完成无主动通知，用户需自己打开 Web 查看 |
+| 7 | **无质量保障** | 产出直接 complete，无质检环节；LLM 单次直出可能出现事实错误、AI 味重、内容空洞 |
 
 ---
 
@@ -97,12 +100,14 @@ Hermes agent：pending-executions 列请求 → next --task-id 定向领取
 用户在 Web 界面将待办（todo）任务拖入等待（waiting）队列后，不再需要任何手动操作：
 
 1. 系统在分钟级延迟内自动开始执行该任务。
-2. 常规任务直接调用 LLM API 单次生成产出（快、便宜）；被标记为"复杂任务"的走 Hermes agent 深度执行（质量优先）。
-3. 产出按内容类型（短文/长文/视频脚本）生成，落盘到 `outputs/tasks/<id>/output.md`。
-4. 执行完成后任务自动标记 done，并向 QQ 推送通知（任务名 + 摘要 + 产出位置）。
+2. 常规任务直接调用 LLM API 生成产出，经轻量质检合格后完成；被标记为"复杂任务"的走 Hermes agent 深度执行（agent 自审）。
+3. 产出按内容类型（短文/长文/视频脚本）生成，落盘到 `outputs/tasks/<id>/output.md`，旧版本保留。
+4. 执行完成后任务自动标记 done，QQ 推送通知（任务名 + 摘要 + 产出位置），Web 端同步未读标记。
 5. 执行失败的任务自动退回等待队列并标记原因，随下一轮调度自然重试；连续失败达到阈值后自动暂停，需人工干预。
-6. 执行中途卡死（in_progress 超时）的任务自动回收退回等待队列。
-7. 用户在 Web 界面可随时"立即执行"某个等待任务（插队，绕开自动执行开关）；对产出不满意可打回重做（已有拖拽回移基础）。
+6. 执行中途卡死（心跳超时）的任务自动回收退回等待队列；过期任务（热点时效已过）自动归档。
+7. 用户在 Web 界面可随时"立即执行"某个等待任务（插队，绕开自动执行开关）；对产出不满意可打回重做（旧版保留）。
+8. 调度器健康可见：Web 端显示调度器最后运行时间，异常标红。
+9. 成本可见可控：每次执行记录 token 消耗，Web 端统计展示；每日预算超限自动暂停并通知。
 
 ### 3.2 需求决策记录（用户逐项确认）
 
@@ -116,6 +121,17 @@ Hermes agent：pending-executions 列请求 → next --task-id 定向领取
 | 失败处理 | 先简单 | 退回等待队列 + 标记原因，不自动重试，靠下一轮调度自然重试（需防呆上限） |
 | 完成语义 | 直接完成 | 产出即标 done，靠通知看结果；不满意手动打回重做（打回机制已有基础） |
 | 调度架构 | 方案 A | cron 高频 tick 调度器（无状态、自愈、低成本），弃选 B（改 cron 批量）与 C（服务内嵌线程） |
+
+### 3.3 外部审阅采纳决策（v2 新增）
+
+依据《Idea-Hub 产品与技术审阅报告》，本次迭代纳入以下改进；详见第 8 章逐条处理记录。
+
+| 类别 | 采纳项 |
+|---|---|
+| 必须解决 | 心跳 + 分类型超时、执行幂等、调度器健康监控、热点时效（expire_at） |
+| 应该解决 | 轻量质检、成本统计与预算上限、tick 只分发不等待、产出版本管理 |
+| 明确 | 双实例部署策略、复杂任务判定标准、content_type 判定规则、子进程日志、产出清理策略 |
+| 维持 YAGNI | 多平台发布、数据复盘、素材库沉淀、在线编辑器、任务优先级字段、版权查重 |
 
 ---
 
@@ -148,6 +164,8 @@ uvicorn 启动时起后台 asyncio 任务，每 5 分钟 tick。
 
 方案 A 同时满足准实时、自愈、低成本三个核心目标，完全复用现有 `next/complete/fail` 状态机与 SQLite 原子操作，不引入新的进程守护与分布式锁。系统 cron 天然提供崩溃恢复（每次 tick 全新进程），比常驻线程更可靠。
 
+**v2 修订**：采纳审阅意见"tick 只分发不等待"——常规任务也以子进程方式异步执行，tick 本身保持秒级完成，避免任务执行时间超过 tick 间隔导致调度漂移。
+
 ---
 
 ## 5. 设计
@@ -157,25 +175,34 @@ uvicorn 启动时起后台 asyncio 任务，每 5 分钟 tick。
 ```
  Web 前端（拖拽/按钮：todo→waiting）         QQ bot（查询入口，保持不变）
         │                                          ▲
-        ▼                                          │ hermes send（完成/失败/暂停通知）
+        ▼                                          │ hermes send（完成/失败/暂停/预算/调度异常）
    等待队列(waiting)                        ┌───────┴────────┐
         │                                   │  QQ 群通知      │
         ▼                                   └────────────────┘
-云端 crontab 每 5 分钟 → scheduler.py（无状态单次运行，跑完即退）
+云端 crontab 每 5 分钟 → scheduler.py（无状态 tick，只分发不等待，秒级退出）
         │  next 原子领取（waiting → in_progress，防并发）
-        ├── 常规任务 → 直调 DeepSeek API（按 content_type 单次生成）
-        │        → 落盘 outputs/tasks/<id>/output.md → complete → hermes send 通知
-        └── 复杂任务 → spawn 云端 hermes agent 子进程（定向执行）
-                 → agent 深度创作（可迭代/联网）→ complete / fail → hermes send 通知
-  失败 → fail 退回 waiting + 原因；连续失败 3 次自动暂停（需人工干预）
+        │  更新 last_scheduler_tick（健康监控）
+        ├── 常规任务 → spawn executor_llm 子进程（异步，tick 不等待）
+        │        ├─ 幂等检查（output.md 已存在 → 直接 complete）
+        │        ├─ 直调 DeepSeek API（按 content_type 生成）
+        │        ├─ 轻量质检（AI 味/事实断言/字数）→ 不达标带反馈重试 1 次
+        │        ├─ 落盘 output.md（旧版改名为 output_v<N>.md 保留）
+        │        ├─ 记录 token_used → complete → 通知（hermes send + notifications 表）
+        │        └─ 失败 → fail 退回 waiting + reason（连续 3 次暂停）
+        └── 复杂任务 → spawn hermes agent 子进程（异步，定向执行）
+                 → agent 深度创作（可迭代/联网/自审）→ complete/fail → 通知
+  心跳检查：in_progress 且 updated_at 超阈值（常规 5 分钟/复杂 60 分钟）→ 回收
+  过期检查：任务 expire_at 已过 → 自动归档 + 通知
+  预算检查：今日 token 消耗超 max_daily_tokens → 暂停自动执行 + 通知
 ```
 
 设计原则：
 
 - **SQLite 仍是唯一数据源**，所有组件通过数据库协作，无直接耦合。
 - **调度无状态**：scheduler.py 每次 tick 全新进程，跑完即退；状态全部持久化在数据库。
+- **tick 只分发不等待**：领取任务后 spawn 执行子进程（常规/复杂皆然），tick 永远秒级完成；cron 触发节奏不因任务执行时长而漂移。
 - **全链路复用现有状态机**：`next / complete / fail` 已是原子操作，调度器只做编排。
-- **产出路径不变**：`outputs/tasks/<id>/output.md`，任务记录存摘要与路径。
+- **产出路径不变**：`outputs/tasks/<id>/output.md`（最新版），旧版 `output_v<N>.md` 保留。
 
 ### 5.2 数据模型变更
 
@@ -187,15 +214,37 @@ uvicorn 启动时起后台 asyncio 任务，每 5 分钟 tick。
 | `is_complex` | INTEGER | 0 | 是否复杂任务：0=LLM API 直出，1=走 Hermes agent 深度执行 |
 | `fail_count` | INTEGER | 0 | 连续失败次数（成功时清零），达到阈值自动暂停 |
 | `last_fail_reason` | TEXT | NULL | 最近一次失败原因（Web 界面可见） |
+| `expire_at` | TEXT | NULL | 热点时效截止（ISO 时间）；过期任务调度时自动归档。生成时继承关联热点的时效，无关联热点可空（不失效） |
+| `token_used` | INTEGER | 0 | 本次执行累计消耗 token（含生成 + 质检重试），用于成本统计 |
 
 **settings 表新增配置项：**
 
 | key | 默认值 | 说明 |
 |---|---|---|
 | `auto_execute` | `'1'` | waiting 队列自动执行总开关（与 auto_run 独立：auto_run 管收集+生成，auto_execute 管执行调度） |
-| `max_per_tick` | `'1'` | 每轮 tick 最多执行任务数（串行，成本可控） |
+| `max_per_tick` | `'1'` | 每轮 tick 最多领取任务数（领取数，非并发数；执行均为异步子进程） |
 | `max_fail_count` | `'3'` | 连续失败暂停阈值 |
-| `stale_in_progress_min` | `'60'` | in_progress 卡死回收阈值（分钟） |
+| `stale_simple_min` | `'5'` | 常规任务卡死回收阈值（分钟）——以 updated_at 为心跳 |
+| `stale_complex_min` | `'60'` | 复杂任务卡死回收阈值（分钟）——以 updated_at 为心跳 |
+| `max_daily_tokens` | `'500000'` | 每日 token 预算上限，超限自动暂停自动执行并通知 |
+| `last_scheduler_tick` | `''` | 调度器健康心跳：每次 tick 更新当前时间；Web 端据此显示"最后运行 X 分钟前"，超 15 分钟标红 |
+
+**sources 表新增字段：**
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `ttl_hours` | INTEGER | 24 | 该来源热点的默认时效（小时），收集时写入 hot_items，再继承到任务 |
+
+**新表 notifications（通知记录，Web 端未读标记）：**
+
+| 字段 | 说明 |
+|---|---|
+| id | 主键 |
+| task_id | 关联任务（可空，如调度异常通知） |
+| type | `done` / `failed` / `paused` / `expired` / `budget` / `scheduler` |
+| title / body | 通知标题与正文 |
+| is_read | 是否已读（Web 端角标） |
+| created_at | 时间 |
 
 **execute_requests 语义升级：** 从"手动执行请求"变为"插队请求"——插入后下一轮 tick 优先处理。表结构不变，Web 端"立即执行"按钮保留并复用。
 
@@ -204,58 +253,81 @@ uvicorn 启动时起后台 asyncio 任务，每 5 分钟 tick。
 cron 每 5 分钟触发，单次运行，严格顺序：
 
 ```
-1. auto_execute == '0' → 退出
-2. 卡死回收：in_progress 且 updated_at 超过 stale_in_progress_min 分钟
+1. 更新 last_scheduler_tick（健康心跳，最先做，保证监控可见）
+2. 检查预算：今日 token 消耗 >= max_daily_tokens → 记 notification（budget），跳过自动领取（插队请求仍放行）并通知
+3. auto_execute == '0' → 仅处理插队请求（步骤 6a）后退出；跳过自动领取、卡死回收与过期归档
+4. 卡死回收：in_progress 且 (now - updated_at) 超过对应阈值
+   （常规任务 stale_simple_min=5 / 复杂任务 stale_complex_min=60）
    → 标记 fail 退回 waiting，reason="执行超时回收"（修复现状缺口 4）
-3. 领取任务（最多 max_per_tick 个）：
+   —— updated_at 即心跳：执行过程中任何写库动作都会刷新它
+5. 过期归档：waiting 任务 expire_at 已过 → 转 archived，记 notification（expired）
+   （todo 状态不自动处理：任务还在人挑选阶段，是否过期由用户自行判断）
+6. 领取任务（最多 max_per_tick 个）：
    a. 优先处理 execute_requests 中 pending 的任务（手动插队优先）
-   b. 无 pending → next 领 waiting 队首（最早 updated_at）
-4. 逐任务分发：
-   - is_complex=1 → spawn hermes agent 子进程（后台执行，不阻塞 tick）
-   - 否则 → 调用常规执行器（直调 API，同步完成）
-5. 执行完成/失败 → 更新状态 + hermes send 通知（失败不自动重试，靠下一轮自然重试）
-6. 日志落盘 logs/scheduler.log（每 tick 一行：时间/动作/任务 id/结果）
+   b. 无 pending → next 领 waiting 队首（最早 updated_at，且未过期）
+7. 逐任务分发（只分发不等待）：
+   - is_complex=1 → spawn hermes agent 子进程（后台，日志重定向 logs/executor-<task_id>.log）
+   - 否则 → spawn executor_llm 子进程（后台，日志同上）
+8. 日志落盘 logs/scheduler.log（每 tick 一行：时间/动作/任务 id/结果）
 ```
 
 防呆设计：
 
-- **失败防呆**：`fail_count >= max_fail_count` 时任务自动暂停——保持 waiting 状态但调度跳过，同时通知用户人工干预；用户在 Web 界面重置失败计数后恢复自动执行。
-- **卡死回收**：复杂任务 spawn 时记录时间；hermes 子进程超时（无产出）由下轮 tick 的超时回收兜底。
-- **手动插队**："立即执行"按钮始终可用，绕开 auto_execute 开关直接插队（用户明确要跑的必须能跑）。
+- **失败防呆**：`fail_count >= max_fail_count` 时任务自动暂停——保持 waiting 状态但调度跳过，同时记 notification（paused）；用户在 Web 界面重置失败计数后恢复自动执行。
+- **卡死回收**：以 `updated_at` 为心跳（任务状态变化即刷新），常规/复杂任务分别用 5/60 分钟阈值；hermes 子进程启动失败（如环境问题）也由回收兜底，不会永久卡死。
+- **执行幂等**：executor_llm 执行前检查 `output.md` 已存在且非空 → 直接 complete，不重复调用 API（防 complete 网络中断后的重复生成）。
+- **手动插队**："立即执行"按钮始终可用，绕开 auto_execute 与预算检查直接插队（用户明确要跑的必须能跑）。
 - **tick 防重入**：scheduler.py 加文件锁（flock），防止 cron 重叠触发。
 - **并发安全**：`next` 是原子 UPDATE（`WHERE status='waiting'`），多 tick 不会重复领取同一任务。
+- **预算防呆**：每日 token 消耗超限自动暂停自动执行并通知；次日重置。
 
-成本控制：默认每轮 1 个任务串行执行。5 分钟一轮，理论吞吐 12 个/小时，实际受 API 耗时限制（每任务几十秒到几分钟），个人使用绰绰有余。
+成本控制：默认每轮领取 1 个任务；执行均为异步子进程，tick 本身秒级。5 分钟一轮，实际吞吐受 API 耗时限制（每任务几十秒到几分钟），个人使用绰绰有余。
 
 ### 5.4 执行器设计
 
-#### 常规执行器（LLM API 直出）
+#### 常规执行器（executor_llm.py，独立子进程运行）
 
-位置：新增 `idea_hub/executor.py` 模块，提供 CLI 入口 `cli.py execute-auto --task-id N`（与现有 next/complete 风格一致）。
+位置：`idea_hub/executor.py` 模块，提供 CLI 入口 `cli.py execute-auto --task-id N`。
 
 流程：
 
 ```
-读任务：idea.md 构思全文 + content_type + 激活目标描述 + 关联热点信息
-   ↓
-按 content_type 选 prompt 模板（见 5.5 产出规格），注入任务信息
-   ↓
-调 DeepSeek API（非流式单次调用，复用 scorer.py 的调用方式与 key 配置）
-   ↓
-输出校验：非空 / 达到该类型最低字数 / 非 LLM 报错文本 → 不通过则 fail
-   ↓
-落盘 outputs/tasks/<id>/output.md（保持现有路径约定）
-   ↓
-complete --summary '<一句话完成摘要>'（LLM 生成或截取产出首段）
+1. 幂等检查：output.md 已存在且非空 → 直接 complete，退出
+2. 读任务：idea.md 构思全文 + content_type + 激活目标描述 + 关联热点信息
+3. 按 content_type 选 prompt 模板（见 5.5 产出规格），注入任务信息
+4. 调 DeepSeek API（非流式单次调用，复用 scorer.py 的调用方式与 key 配置）
+   记录 usage.token → token_used
+5. 轻量质检（第二次 API 调用，短输出，成本低）：
+   检查维度：
+   - 字数是否达标（按类型最低字数）
+   - AI 味词汇密度（模板化表达、排比泛滥）
+   - 事实性断言是否需要标注来源（如引用具体数字/事件，检查有无依据）
+   质检不通过 → 带质检意见重生成 1 次（同一轮内，非跨轮调度重试）
+   → 仍不通过 → fail 退回 waiting，reason 含质检意见
+6. 落盘：若 output.md 已存在（打回重做场景）→ 先改名 output_v<N>.md 保留旧版；
+   新产出写入 output.md
+7. complete --summary '<一句话完成摘要>'（LLM 生成或截取产出首段）
+8. 通知：hermes send（QQ）+ notifications 表双写
 ```
 
 #### 复杂执行器（Hermes agent 深度执行）
 
 - 新增 prompt 文件 `scripts/deploy/prompts/complex-execute.txt`（复用现有 execute.txt 结构，改为定向 `--task-id` 单任务模式）。
-- 调度器 spawn：`hermes chat -q "$(cat prompts/complex-execute.txt)" --task-id N`，后台子进程，**tick 不等待子进程结束**（cron tick 有运行时长限制，不能阻塞）。
-- agent 能力：读构思全文 → 多轮迭代、调用工具（联网调研、读取关联热点原文）→ 产出更高质量内容 → `complete` / `fail`。
-- **通知责任方**：复杂任务的通知由 agent 自身在 complete/fail 之后调用 `hermes send` 发送（agent 拥有 terminal 工具，与现有 execute.txt 中 agent 跑 CLI 命令的模式一致）；调度 tick 只负责 spawn，不负责等待与通知。
+- 调度器 spawn：`hermes chat -q "$(cat prompts/complex-execute.txt)" --task-id N`，后台子进程，日志重定向 `logs/executor-<task_id>.log`；**tick 不等待子进程结束**。
+- agent 能力：读构思全文 → 多轮迭代、调用工具（联网调研、读取关联热点原文）→ 产出更高质量内容 → **执行后自审**（对照质检维度自查，不满意自行修改）→ `complete` / `fail`。
+- **通知责任方**：复杂任务的通知由 agent 自身在 complete/fail 之后发送（agent 拥有 terminal 工具，可调用 `hermes send` 与通知 API）；调度 tick 只负责 spawn，不负责等待与通知。
 - 与 QQ bot 的 hermes 实例并行不冲突（独立会话）。
+
+**复杂任务判定标准（供用户标记时参考，写入 Web 界面提示）：**
+- 需要联网调研或事实核查的（如深度事件分析）
+- 涉及多个信息源交叉验证的
+- 深度长文（>2000 字）或需要多轮迭代打磨的
+- 用户明确指定"要深度执行"的
+
+#### 产出版本管理
+
+- 最新产出永远写入 `output.md`；若该文件已存在（打回重做/再次执行），先将其改名为 `output_v<N>.md`（N 递增）。
+- Web 详情面板显示版本列表，可查看/下载历史版本。
 
 ### 5.5 内容类型产出规格
 
@@ -265,60 +337,85 @@ complete --summary '<一句话完成摘要>'（LLM 生成或截取产出首段�
 | 长文 | `long` | 1000-3000 字 | 公众号/博客风格 | 标题、分段、小标题、结尾 |
 | 视频脚本 | `video_script` | 按分镜 | 口播/分镜脚本 | 开场钩子、节奏标记、分镜表、时长标注 |
 
+**content_type 自动判定规则（生成时，供 generate prompt 使用）：**
+- 热点事件、观点评论、时效性强 → `short`（这类内容执行要快，过期即无价值）
+- 深度话题、教程、知识梳理、热点背景延伸 → `long`
+- 操作演示、流程向、工具介绍、教程步骤 → `video_script`
+- 判定优先级：热点事件优先 short（配合 expire_at 短时效），教程/演示优先 video_script，其余深度内容 long
+- 判定结果前端可改；构思（idea.md）按所选类型生成对应结构要点，避免"构思按 A 类型写、执行按 B 类型做"的错位
+
 所有模板统一注入：任务标题、构思全文、关联热点标题/摘要（保证引用真实素材）；约束：中文、原创、符合激活目标描述（如"自媒体内容"）。
 
 ### 5.6 通知设计
 
-通道：`hermes send --to qq:<群> "<消息>"`（已确认 Hermes CLI 支持从脚本直接发消息到已配置平台，无需 LLM、无需 gateway 常驻）。
+通道：`hermes send --to qq:<群> "<消息>"`（Hermes CLI 支持从脚本直接发消息到已配置平台，无需 LLM、无需 gateway 常驻）。
 
-- **完成通知**：
-  ```
-  Idea Hub 任务完成
-  《任务标题》 [长文]
-  摘要：<一句话摘要>
-  产出：<产出路径或公网链接>
-  ```
-- **失败通知**：任务名 + 失败原因 + 已自动退回等待队列（将随下一轮调度重试）。
-- **暂停通知**：任务名 + 连续失败已达上限，已暂停自动执行，需在 Web 界面处理。
-- **通知失败**：只记日志，不影响任务状态。
+**双写机制**：每次通知同时写入 `notifications` 表；Web 端顶部显示未读角标，可标记已读。QQ 推送失败时（如 QQ bot 暂时不可用），Web 端通知仍可见，任务状态不受影响。
+
+通知类型与内容：
+
+| 类型 | 内容 |
+|---|---|
+| done | 《任务标题》 [内容类型] 摘要：… 产出：<路径或公网链接> |
+| failed | 任务名 + 失败原因 + 已自动退回等待队列（将随下一轮调度重试） |
+| paused | 任务名 + 连续失败已达上限，已暂停自动执行，需在 Web 界面处理 |
+| expired | 任务名 + 热点时效已过，已自动归档 |
+| budget | 今日 token 预算已用尽，自动执行已暂停（次日恢复；立即执行仍可用） |
+| scheduler | 调度器长时间未运行（>15 分钟），系统可能异常 |
 
 ### 5.7 生成侧改动
 
-- `generate.txt` prompt 增加要求：为每条 idea 判定 `content_type`——热点事件/观点类→short；深度话题/教程向→long；操作演示/流程向→video_script。
-- `import-ideas` CLI 接受 `content_type` 字段（缺省 long），任务表落库。
-- `is_complex` 默认 0，由用户在 Web 界面手动标记（简单可靠，不依赖 AI 判断）。
+- `generate.txt` prompt 增加要求：
+  - 为每条 idea 判定 `content_type`（按 5.5 规则），构思全文按所选类型组织结构要点。
+  - 判断该热点的时效性：时效强的（如百度热搜）给出较短的有效期，深度话题给较长或无限期（供 expire_at 使用）。
+- `import-ideas` CLI 接受 `content_type` 与 `expire_at` 字段（缺省 content_type=long、expire_at 继承热点 ttl）。
+- `is_complex` 默认 0，由用户在 Web 界面手动标记（简单可靠，不依赖 AI 判断）；Web 界面提供判定标准提示。
 
 ### 5.8 前端改动（原生 JS，延续现有风格）
 
 - 卡片：content_type 徽标（短文/长文/视频）+ 复杂任务标记。
-- 详情面板：编辑 content_type、切换"复杂任务"标记、显示 fail_count + last_fail_reason、重置失败计数按钮。
+- 详情面板：编辑 content_type、切换"复杂任务"标记（附判定标准提示）、显示 fail_count + last_fail_reason、重置失败计数按钮、版本列表（output_v<N>.md 下载）、token_used。
 - waiting 卡片：保留"立即执行"按钮（语义升级为插队）。
-- 设置弹窗：新增 auto_execute 开关、每轮上限、失败上限、卡死回收分钟数。
+- 设置弹窗：auto_execute 开关、每轮上限、失败上限、常规/复杂卡死回收分钟数、每日 token 预算。
+- 顶部状态栏：调度器最后运行时间（超 15 分钟标红）、今日 token 消耗、未读通知角标。
+- 通知中心：侧边抽屉或弹窗，列出 notifications 表记录，可标记已读。
 
 ### 5.9 错误处理与边界
 
 | 场景 | 策略 |
 |---|---|
 | API 调用失败/限流 | fail 退回 waiting + reason，下一轮自然重试，达上限暂停 |
-| LLM 输出非法（空/超短/报错文本） | 同上 |
-| hermes 子进程崩溃/超时 | 下轮 tick 超时回收兜底，fail 退回 |
-| 通知发送失败 | 只记日志，不影响任务状态 |
+| LLM 输出非法（空/超短/报错文本） | fail 退回，同上 |
+| 质检不通过 | 带反馈重生成 1 次；仍不通过 fail 退回（reason 含质检意见） |
+| hermes 子进程崩溃/超时 | updated_at 心跳超时回收（复杂 60 分钟） |
+| 执行卡死（常规） | updated_at 心跳超时回收（常规 5 分钟） |
+| complete 后网络中断（任务仍 in_progress） | 幂等检查：下轮回收或重跑时 output.md 已存在 → 直接 complete，不重复生成 |
+| 通知发送失败 | notifications 表兜底（Web 可见），只记日志，不影响任务状态 |
 | cron tick 重叠 | `next` 原子领取防重复；scheduler 文件锁防重入 |
 | 数据库并发 | 沿用 WAL + 短事务 |
+| 任务过期 | 调度时 expire_at 已过 → 自动归档 + expired 通知 |
+| 每日预算超限 | 暂停自动执行 + budget 通知；立即执行仍可用；次日重置 |
+| 调度器本身失效（cron 挂/服务器重启） | last_scheduler_tick 停止更新 → Web 标红 + scheduler 通知 |
+| 任务删除与产出文件 | 删除任务不删产出目录（防误删）；Web 提供手动清理入口 |
 
 ### 5.10 测试策略（pytest 扩展，现有 78 个不破坏）
 
-- executor 单元：mock API 成功/空响应/超短 → complete/fail 分支；三种类型模板渲染。
-- scheduler 单元：插队优先、队首领取、失败计数清零/暂停、in_progress 超时回收、auto_execute 开关、文件锁。
-- 通知：mock `hermes send` 调用（验证参数，不真发）。
-- 端到端：waiting → 调度执行（mock API）→ done → 通知记录。
+- executor 单元：mock API 成功/空响应/超短 → complete/fail 分支；三种类型模板渲染；质检通过/不通过/重试一次仍不通过分支；幂等（output.md 已存在 → 直接 complete）；版本保留（旧版改名 output_v<N>.md）。
+- scheduler 单元：插队优先、队首领取、失败计数清零/暂停（含边界：fail_count = max-1 时失败 → 暂停；成功后清零 → 恢复）、心跳超时回收（常规 5 分钟/复杂 60 分钟）、过期归档、预算超限暂停、auto_execute 开关、文件锁（第二个 tick 并发运行时不重复领取）。
+- 集成测试：模拟 in_progress 超时 → 下轮 tick 回收 → 重跑 → done 全链路；complete 失败后重跑不重复生成（幂等）。
+- 通知：mock `hermes send` 调用（验证参数，不真发）；notifications 表双写验证。
+- 端到端：waiting → 调度执行（mock API）→ 质检通过 → done → 通知记录。
 
 ### 5.11 明确不做（YAGNI）
 
-- 执行进度百分比/流式展示（in_progress 状态 + 日志足够）。
+- 执行进度百分比/流式展示（in_progress 状态 + 心跳时间 + 日志足够）。
 - 多 worker 并行执行（串行成本可控，以后需要再加）。
-- 执行结果自动发布到自媒体平台（用户手动发布/编辑，产出落盘 + 通知即可）。
+- 执行结果自动发布到自媒体平台（用户手动发布/编辑，产出落盘 + 通知即可；发布相关数据复盘依赖此能力，一并延后）。
 - 任务执行历史表（日志文件 + 状态字段覆盖需求）。
+- 任务优先级字段（FIFO + 手动插队 + 过期归档覆盖"人挑选"场景，避免语义复杂化）。
+- 版权查重/原创性检测（超出个人工具范围，演进方向考虑）。
+- 在线编辑器（外部编辑器过渡，Web 提供版本下载）。
+- 素材库沉淀（热点信息复用，长期演进方向）。
 
 ---
 
@@ -329,34 +426,95 @@ complete --summary '<一句话完成摘要>'（LLM 生成或截取产出首段�
 ### 6.1 功能闭环
 
 - [ ] 任务进入 waiting 队列后，5 分钟内自动开始执行（logs/scheduler.log 有领取记录）
-- [ ] 常规任务（is_complex=0）直接 API 生成，产出落盘 `outputs/tasks/<id>/output.md`，任务转 done
+- [ ] 常规任务（is_complex=0）API 生成 + 质检通过，产出落盘 `outputs/tasks/<id>/output.md`，任务转 done
 - [ ] 复杂任务（is_complex=1）spawn hermes agent 子进程执行，产出落盘，任务转 done
 - [ ] 三种内容类型（short/long/video_script）产出格式符合 5.5 规格
-- [ ] 完成/失败/暂停时 QQ 收到对应通知（消息格式符合 5.6）
-- [ ] "立即执行"按钮可插队（绕过 auto_execute 开关）
-- [ ] 打回重做：done → 拖回 waiting/in_progress，附意见后重新执行
+- [ ] 完成/失败/暂停/过期/预算通知均到达 QQ，且 Web 端 notifications 表可见（未读角标）
+- [ ] "立即执行"按钮可插队（绕过 auto_execute 开关与预算检查）
+- [ ] 打回重做：done → 拖回 waiting/in_progress，附意见后重新执行；旧版保留为 output_v<N>.md
 
 ### 6.2 稳定性
 
 - [ ] 模拟 API 失败：任务退回 waiting，reason 记录正确，下一轮 tick 自动重试
-- [ ] 连续失败 3 次：任务暂停自动执行，QQ 收到暂停通知；Web 重置计数后恢复
-- [ ] 模拟 in_progress 卡死（手工改 updated_at 为 60 分钟前）：下一轮 tick 回收退回 waiting
-- [ ] auto_execute=0 时调度跳过，auto_execute=1 时恢复
+- [ ] 连续失败 3 次：任务暂停自动执行，收到 paused 通知；Web 重置计数后恢复
+- [ ] 模拟 in_progress 卡死（手工改 updated_at 为超过阈值前）：下轮 tick 回收退回 waiting（常规 5 分钟 / 复杂 60 分钟）
+- [ ] 模拟 complete 后中断（output.md 已存在但任务 in_progress）：重跑直接 complete，不重复调用 API（幂等）
+- [ ] 模拟过期：waiting 任务 expire_at 已过 → 自动归档 + expired 通知
+- [ ] 模拟预算超限：自动执行暂停 + budget 通知；立即执行仍可用
+- [ ] auto_execute=0 时调度跳过（插队仍放行），auto_execute=1 时恢复
 - [ ] 两个 scheduler.py 同时运行：文件锁生效，只有一个执行
-- [ ] 执行中杀掉 hermes 子进程：任务不永久卡死，由超时回收兜底
+- [ ] 执行中杀掉执行子进程/agent：任务不永久卡死，由心跳超时回收兜底
+- [ ] 调度器健康监控：Web 显示 last_scheduler_tick；手工停 cron 15 分钟后标红
 
 ### 6.3 数据与兼容
 
-- [ ] 旧库迁移：tasks 表新增字段正确，存量数据默认值正确（content_type=long, is_complex=0, fail_count=0）
+- [ ] 旧库迁移：tasks 新增字段正确（content_type=long, is_complex=0, fail_count=0, expire_at=NULL, token_used=0）；sources 新增 ttl_hours 默认 24；notifications 表创建成功
 - [ ] 现有 78 个测试 + 新增测试全部通过
-- [ ] 云端 crontab 更新后无重复执行（旧 03:00 执行条目已移除）
+- [ ] 云端 crontab 更新后无重复执行（旧 03:00 执行条目已移除，新增每 5 分钟 scheduler 条目）
+- [ ] 本地开发环境不启调度（双实例策略：生产单一实例云端，本地仅开发调试）
 
 ---
 
 ## 7. 后续演进方向（不在本次范围）
 
+- **任务优先级**：priority 字段 + 突发热点自动提权（本次用 FIFO + 插队 + 过期归档覆盖）。
 - **内容类型扩展**：问答、代码教程、图文卡片等新类型。
-- **自动发布**：对接自媒体平台 API，产出后自动发布。
+- **自动发布**：对接自媒体平台 API，产出后自动发布；发布后数据回流形成"选题→效果"复盘闭环，校准评分阈值。
+- **素材库沉淀**：热点信息清洗后沉淀为可复用素材，生成时自动关联历史素材。
+- **在线编辑器**：Web 内置产出编辑（当前用外部编辑器过渡）。
+- **版权查重/原创检测**：产出发布前的查重与来源标注。
 - **执行质量反馈**：用户对产出的评分回流，优化生成 prompt。
 - **多目标模式**：多个目标（自媒体/技术博客/视频号）各自独立队列与执行配置。
-- **成本报表**：每日 token 消耗与执行统计。
+
+---
+
+## 8. 外部审阅意见处理记录
+
+来源：《Idea-Hub 产品与技术审阅报告》（2026-08-13）。逐条处理如下：
+
+### 8.1 采纳（已纳入本次设计）
+
+| # | 审阅意见 | 处理 |
+|---|---|---|
+| 1 | 复杂任务无心跳，卡死回收太迟钝 | 采纳：updated_at 作心跳；阈值拆分 stale_simple_min=5 / stale_complex_min=60（见 5.2、5.3） |
+| 2 | 热点时效性无处理 | 采纳：sources.ttl_hours → tasks.expire_at；过期自动归档 + 通知（见 5.2、5.3、5.7） |
+| 3 | 执行幂等性 | 采纳：执行前检查 output.md 已存在 → 直接 complete（见 5.3、5.4） |
+| 4 | 调度器健康监控 | 采纳：last_scheduler_tick + Web 标红 + scheduler 通知（见 5.2、5.3、5.6、5.8） |
+| 5 | 无内容质检环节 | 采纳：轻量质检（AI 味/事实断言/字数），不达标带反馈重试 1 次，仍不达标 fail（见 5.4） |
+| 6 | 无成本监控 | 采纳最小版：token_used 记录 + 每日预算上限 + Web 展示（见 5.2、5.3、5.8） |
+| 7 | tick 与任务执行耦合，吞吐受限 | 采纳：tick 只分发不等待，常规任务也异步子进程执行（见 5.1、5.3） |
+| 8 | 内容版本管理 | 采纳：output_v<N>.md 保留旧版（见 5.4） |
+| 9 | 复杂任务定义不清晰 | 采纳：给出明确判定标准并写入 Web 提示（见 5.4） |
+| 10 | content_type 判定标准模糊 | 采纳：细化规则 + 判定优先级 + 构思按类型生成 + 前端可改（见 5.5、5.7） |
+| 11 | 通知渠道单一 | 采纳：notifications 表双写，Web 未读角标兜底（见 5.6） |
+| 12 | 本地/云端双运行冲突 | 采纳：明确生产单一实例（云端），本地仅开发不启调度（见 6.3、5.9） |
+| 13 | hermes 子进程日志位置不明 | 采纳：日志重定向 logs/executor-<task_id>.log（见 5.3） |
+| 14 | 产出文件清理策略不明 | 采纳：任务删除不删产出目录（防误删），Web 可手动清理（见 5.9 邻近说明，8.1-14 备注） |
+| 15 | 测试缺超时回收/幂等/重叠/边界 | 采纳：补充对应测试（见 5.10） |
+
+### 8.2 不采纳（维持 YAGNI 或现状，理由如下）
+
+| # | 审阅意见 | 理由 |
+|---|---|---|
+| 1 | 任务优先级字段（5.2 节意见） | FIFO + 手动插队 + 过期归档已覆盖"人挑选"场景；显式 priority 增加语义复杂度，收益有限。列入演进方向 |
+| 2 | 多平台发布（4.3 节意见） | 维持 YAGNI；审阅自身也同意延后（8.3-9）。闭环到"产出落盘 + 通知"对当前使用足够；已在设计里留扩展点（content_type 决定产出格式） |
+| 3 | 数据复盘（4.4 节意见） | 依赖发布能力，一并延后；评分阈值校准列入演进 |
+| 4 | 素材库沉淀（4.5 节意见） | 长期价值大但当前非瓶颈，列入演进 |
+| 5 | 在线编辑器（4.2 节意见） | 外部编辑器 + Web 版本下载过渡，列入演进 |
+| 6 | 版权查重/原创检测（7.3-9） | 超出个人工具范围；质检已覆盖"事实断言标注来源"的轻量提示 |
+| 7 | Basic Auth 升级（7.3-10） | 个人项目 + Cloudflare Tunnel 零端口暴露，现状足够；无信用卡环境也不宜上 Zero Trust |
+| 8 | 备份频率（7.2-7） | 每日 03:30 + SQLite WAL，个人项目可接受；调度器不引入新的数据损坏面（无状态、短事务） |
+| 9 | 复杂任务改用更强模型 API（7.1-1） | Hermes 已接入可用模型且具备工具能力（联网/多轮/文件）；复杂任务量少，会话成本可接受；用户已确认分层方案 |
+
+### 8.3 需用户注意的开放疑问（对应审阅 7.1）
+
+| 疑问 | 说明 |
+|---|---|
+| 待办配额默认 10 的依据 | 经验默认值，settings 可调；运行数据积累后再校准 |
+| 评分阈值（>=75 收录、>=8 待办）是否校准过 | 未基于真实产出效果校准；数据复盘能力（演进方向）落地后可校准 |
+| 视频脚本类型的后续链路 | 本次仅产出脚本；配音/剪辑/字幕流水线为独立演进方向 |
+| 百度热搜等采集合规性 | 现状可用（公开 API）；若遇反爬或条款变更，来源可配置切换 |
+
+---
+
+*本规格 v2 吸收审阅意见后修订。回归验证按第 6 章清单执行。*
