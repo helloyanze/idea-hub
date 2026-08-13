@@ -141,7 +141,7 @@ web/
 |---|---|---|
 | `notifications` | id, type, title, body, level, entity_type, entity_id, is_read, created_at | entity_type/entity_id 关联任务/热点，前端可跳转，Hermes 推送可定位 |
 | `outputs` | id INTEGER PK AUTOINCREMENT, task_id, version, filename, content, file_mtime, file_hash, created_at, updated_at | id 为自增主键（FTS5 content_rowid 映射必需）；(task_id, version) UNIQUE 约束，每版本一行；file_mtime/file_hash 供读时校验（见 5.3） |
-| `jobs` | id, type, status, progress, result_ref, error, heartbeat_at, token_used, created_at, updated_at | status: pending/running/done/failed；result_ref 为 JSON 字符串；heartbeat_at 供崩溃恢复（见 5.5）；token_used 统计生成/评分阶段 LLM 消耗（见 5.4） |
+| `jobs` | id, type, status, progress, result_ref, error, heartbeat_at, token_used, created_at, updated_at | status: pending/running/done/failed；type: collect/generate/execute；result_ref 为 JSON 字符串；heartbeat_at 供崩溃恢复（见 5.5）；token_used 全部类型均记录（execute 与 tasks.token_used 双写），供预算检查与统计（见 5.4） |
 | `schema_version` | version | 迁移版本号（未来 schema 演进用，本次不迁移数据） |
 
 **FTS5 虚拟表（3 张，external content + 触发器）：** 全部使用 tokenize='trigram'（SQLite 3.34+，中文按 3-gram 可检索；unicode61 对中文分词无效）
@@ -167,7 +167,7 @@ web/
 | in_progress | 禁止 | 允许（执行失败回退） | - | 允许（完成） |
 | done | 允许（拖拽回炉，不动 fail_count） | 禁止 | 允许（仅限无产物补执行，条件 UPDATE 限定） | - |
 
-- 状态变更仅通过 move 操作；进入 done 时记录 completed_at
+- 所有状态变更必须符合迁移矩阵；move 端点仅允许 API 合法子集（见 6.3），内部服务变更（执行器/调度器）不受 move 端点限制；进入 done 时记录 completed_at
 - **两套迁移规则区分**：上表为"内部状态变更"全集（move / execute / redo / 过期 / 执行失败共用）；其中 `done → in_progress` 仅由 execute 端点内部条件 UPDATE 完成（限定 status='done' AND 无 outputs 行），**move 端点一律禁止该迁移**（前端看板拖拽不允许 done → in_progress 列，需先拖回 todo 或触发补执行）
 - 执行失败：执行器将任务 in_progress → waiting（fail_count + 1，last_fail_reason 记录），不引入 failed 状态
 - 补执行：done 且无产物的任务允许直接触发 execute（done → in_progress，条件 UPDATE 限定 status='done' AND 无 outputs 行），视为补产出
@@ -194,7 +194,9 @@ web/
 - `tasks.content_type` 枚举：article（文章，默认）/ video_script（视频脚本）/ tweet（短文）/ newsletter（简报）；生成时由 LLM 根据热点类型与 target_desc 判定，手动建任务可指定
 - `tasks.score_breakdown`：JSON 字符串，多维评分明细，如 {"facts": 8, "verification": 7, "timeliness": 9, "value": 8}；维度来源 = settings.score_dimensions（JSON 数组，默认 ["facts","verification","timeliness","value"]，可运行时调整）；feasibility_score = 各维度加权均值（四舍五入）。维度不随 target_desc 变化（target_desc 仅文本描述，不承载配置）
 - 评分数据链：评分阶段（S3）写入 hot_items.score_breakdown + final_score；generate 从热点创建任务时继承 score_breakdown 写入 tasks（feasibility_score = final_score）；手动建任务不评分，score_breakdown 为空（评分组件显示"未评分"态）
+- 评分触发机制：评分是 collect job 的内部步骤（抓取 → 规则过滤 → LLM 评分 → verdict/final_score/score_breakdown 写入，同一 job 内完成），不设独立 score job；未配置 LLM key 时降级：跳过评分，verdict=admit（全量收录，评分字段为空），generate 候选此时按 collected_at 排序
 - 评分权重：默认等权均值（各维度权重 1）；score_dimensions 保持名称数组，暂不支持权重配置
+- 评分维度变更：修改 score_dimensions 仅影响后续评分；历史 score_breakdown 按原维度展示，前端评分组件兼容缺失/额外维度（缺失显示 0，额外忽略）
 - `tasks.idea_summary`：生成阶段 LLM 产出的一句话摘要（构思主题）；`tasks.ai_summary`：执行完成后 AI 对成文的总结（文章要点）；两者均入 FTS 索引
 - idea 文件管理：构思全文落盘 outputs/tasks/<id>/idea.md（固定模式），由 generate 服务（S4）随任务创建时写入；不版本化、不做外部变更检测（只读中间产物）
 - `notifications.type` 枚举：collect_done / generate_done / execute_done / job_failed / task_expired / budget_exceeded / discard_cleaned（可扩展）
@@ -204,8 +206,10 @@ web/
 - `outputs.filename` 在 PUT 编辑时：继承当前最新版本的 filename（保持不变），保证历史版本导出文件名稳定；仅上传替换更新为原始名
 - 版本递增原子性：PUT/upload 在同一事务内 SELECT MAX(version) → 校验 base_version == MAX → INSERT (MAX+1)，依赖 UNIQUE(task_id, version) 约束兜底，冲突返回 409
 - `sources.keywords`：关键词白名单（逗号分隔），标题包含任一关键词才收录；空 = 不过滤；仅匹配标题，不匹配正文
+- 标签颜色分配：固定 8 色调色板，新建标签按 (当前标签总数 % 8) 顺序取色；删除重建不复用旧色（按创建顺序轮转），保证幂等
 - `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零
 - `jobs.token_used`：全部类型 job 均记录（collect/generate/execute）；execute job 的 token 同时写 tasks.token_used 与 jobs.token_used（双写）
+- execute job 的 token_used 更新时机：每个任务完成后立即累加更新（与 tasks.token_used 同事务写入），保证预算实时检查可用
 - stats 汇总去重：执行累计 = SUM(tasks.token_used)；生成/评分累计 = SUM(jobs.token_used WHERE type IN ('collect','generate'))；展示两数分列，不直接相加
 - 每日预算基础：今日消耗 = SUM(jobs.token_used WHERE date(created_at)=today)（含 execute，按日可准确聚合）
 
@@ -218,6 +222,7 @@ web/
 - job 去重：同类型 job 已有 running 时，POST 返回已有 job_id（不新建）
 - result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
 - 调度器持久化（settings 内部键，不通过 PUT 修改）：scheduler_last_tick（每次 tick 更新，/health 判断存活：超过 10 分钟未更新判不健康）；scheduler_last_collect（上次 collect 触发时间，与 collect_interval_hours 配合决定是否触发 collect）
+- 内部键初始行为：首次 tick 前两键均不存在——scheduler_last_collect 缺失视为"从未收集"，首个 tick 即触发 collect；scheduler_last_tick 缺失时 /health 返回"调度器从未运行"（不健康）；首个 tick 运行结束写入两键
 - 收集频率执行机制：cron 按基础频率（每 5 分钟）唤醒 scheduler tick；tick 读取 collect_interval_hours，距 scheduler_last_collect 超过间隔则触发 collect job 并更新该键——动态参数真正生效
 - 调度器触发与去重：tick 触发 collect 走同一 job 去重（同类型 running 存在则跳过本次触发，不更新 scheduler_last_collect，下一 tick 重试）；scheduler_last_collect 在成功创建新 job 后立即更新
 
@@ -236,7 +241,7 @@ DELETE /api/v1/sources/{id}             # 仅允许无关联 hot_items 的来源
 POST   /api/v1/sources/{id}/test      # 测试抓取（验证渠道可用性）
 ```
 
-test 响应：{ok: bool, item_count: int, sample_items: [...], error?: string}——ok=false 时 error 说明失败原因（网络/解析/鉴权），前端展示抓取条目数与示例。
+test 响应：{ok: bool, item_count: int, sample_items: [...], error?: string}——ok=false 时 error 说明失败原因（网络/解析/鉴权），前端展示抓取条目数与示例。test 只验证连通性与解析，**不落库**（sample_items 为内存数据，不写 hot_items）。
 
 ### 6.2 hotspots
 
@@ -258,7 +263,7 @@ DELETE /api/v1/tasks/{id}                    # 级联：删 task_links、task_ta
 POST   /api/v1/tasks/{id}/move      {to_status}   # 遵守 5.2 迁移矩阵；done → in_progress 禁止（补执行仅走 execute）
 GET    /api/v1/tags                          # 标签列表（含颜色）
 PUT    /api/v1/tasks/{id}/tags      {names: []}  # 替换语义：按名称 upsert（不存在自动创建，颜色从调色板轮转分配），设置任务全部标签
-POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）；允许前置状态：todo / waiting / done（仅限无产物补执行）；in_progress 409
+POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）；允许前置状态：todo / waiting / done（仅限无产物补执行）；in_progress 409。批量 POST /execute 同步校验全部 task_ids：任一非法 → 整体 409 + 附带 {invalid_task_ids: [...]}
 POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：仅限 done 或 fail_count > 0（无 failed 状态）；status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）；其他 409
 POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数：仅限 fail_count > 0；其他 409（区别于 redo：不改变状态）
 ```
@@ -321,7 +326,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 
 实现：三张 FTS 表分别 MATCH 后 UNION；每条结果结构：{entity_type, entity_id, title, snippet, score}（snippet = 命中位置前后截取片段，title = 该实体标题，score = 组内 bm25 排序用）。output 类型结果的 entity_id = task_id（前端跳转任务详情；outputs_fts 的 task_id UNINDEXED 列提供该值，不用 outputs.id）。支持过滤器扩展（entity_type=、source_id=、status=）。
 
-分页策略：三表分别 MATCH 各取前 size 条 → 应用层按 entity_type 分组（组内 bm25 排序）→ 合并列表后按 page/size 统一分页返回（每页可含多组结果）；前端展示时按 entity_type 分组渲染。
+分页策略：三表分别 MATCH 各取前 page × size 条（保证后续页偏移覆盖）→ 应用层按 entity_type 分组（组内 bm25 排序）→ 合并列表后按 page/size 统一分页返回（每页可含多组结果）；前端展示时按 entity_type 分组渲染。
 
 与单表搜索的关系：/hotspots?q=、/tasks?q= 为单表 FTS 检索（页面内过滤），/search 为三表 UNION 全局检索；共用同一匹配实现，仅作用域不同。
 
@@ -332,6 +337,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - 乐观锁：outputs PUT 必须带 base_version
 - 限流：应用层请求频率限制 + 登录失败延迟；文档注明可升级 Cloudflare Access
 - 原子状态变更：所有任务状态变更（move / execute / redo / 过期完成）用条件 UPDATE（WHERE status IN 允许前置状态），rowcount=0 视为冲突返回 409，杜绝调度器 tick 与 API 并发竞态
+- 内部服务写回冲突：执行器/调度器内部条件 UPDATE 失败（rowcount=0，任务已被用户移走/完成）时——产物仍写入 outputs（不丢数据），状态不修改（不覆盖用户操作），写 warn 通知（"任务状态已被外部变更，产物已保存但状态未更新"），该任务计入 job 的 failed_items/skipped，job 继续处理其余任务
 - job 去重粒度：type 级别（不区分候选集）；generate 显式传 hotspot_ids 在已有 running generate job 时同样返回已有 job_id，不享受例外；去重命中时响应 {job_id, reused: true}，前端提示"已有进行中的任务"
 - execute 幂等兜底：执行器启动前检查 outputs 表——该 task 已有产物行且 status=done → 跳过（视为已执行）；status=done 但无产物（手动移入）→ 允许执行；redo 重置状态后重新可执行
 - DELETE source 并发安全：检查关联 → 删除在事务内完成（BEGIN IMMEDIATE check-then-delete）；collect job 仅处理 enabled=1 的来源（删除前需先 toggle 禁用，天然避免写入竞态）
@@ -408,6 +414,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - 关键操作幂等：collect/generate/execute 重复触发不重复产出
 - 限流：应用层频率限制 + 登录失败延迟（防爆破）
 - 备份恢复：每日备份 = data/idea.db + outputs/ 目录（tar 打包）；恢复时若某 task 落盘文件缺失（备份后新增/外部误删），读时校验发现文件不存在 → 从 DB outputs 表最新版本重建文件
+- 备份一致性：WAL 模式下不直接复制主库文件（会丢失未 checkpoint 写入）——用 SQLite 在线备份 API（sqlite3 .backup / VACUUM INTO）生成一致性快照后再打包，或同时打包 -wal/-shm 文件
 
 ## 10. 测试策略
 
@@ -665,3 +672,21 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 9 | collect_interval_hours 描述过时 | 采纳 | 更新为"动态收集间隔，scheduler tick 读取"（6.6 已改） |
 | 10 | 部分成功通知聚合提示 | 采纳（记录） | 实现时注意聚合逻辑（每批一条） |
 | 11 | hot_items_fts 不含 score_breakdown 无需处理 | 确认 | 无改动（评分变化不影响 FTS） |
+
+### 第九轮审阅回应（2026-08-14）
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | 评分环节缺失触发机制（核心链路断裂） | 采纳 | 评分是 collect job 内部步骤（抓取→过滤→评分→verdict 写入同一 job）；无 LLM key 降级 verdict=admit 全收，generate 候选按时间排序（5.4 已改） |
+| 2 | 内部状态变更并发冲突未定义 | 采纳 | 内部条件 UPDATE 失败时：产物仍写入、状态不修改、warn 通知、计入 failed_items，不覆盖用户操作（6.8 已改） |
+| 3 | 统一搜索分页 page>1 丢数据 | 采纳 | 三表各取 page × size 条再合并分页，偏移覆盖完整（6.7 已改） |
+| 4 | 备份遗漏 WAL 文件 | 采纳 | 用 SQLite 在线备份 API（.backup / VACUUM INTO）生成一致性快照，或打包 -wal/-shm（9 已改） |
+| 5 | execute 部分非法 task_ids 未定义 | 采纳 | 批量同步校验全部：任一非法 → 整体 409 + invalid_task_ids（6.3 已改） |
+| 6 | "状态变更仅通过 move"表述矛盾 | 采纳 | 统一措辞：所有变更必须符合迁移矩阵，move 端点仅 API 合法子集（5.2 已改） |
+| 7 | 内部 settings 键初始值未定义 | 采纳 | last_collect 缺失视为从未收集（首 tick 触发）；last_tick 缺失 /health 判"从未运行"（5.5 已改） |
+| 8 | execute token_used 实时更新时机未定义 | 采纳 | 每任务完成后立即累加更新（与 tasks.token_used 同事务），预算实时检查可用（5.4 已改） |
+| 9 | sources.test 是否写库未定义 | 采纳 | test 只验证连通性与解析，不落库（6.1 已改） |
+| 10 | jobs.token_used 表说明旧口径 | 采纳 | 更新为全部类型均记录（execute 双写）（5.1 已改） |
+| 11 | 标签调色板轮转规则未定义 | 采纳 | 固定 8 色，按 (标签总数 % 8) 顺序取色，删除重建不复用（5.4 已改） |
+| 12 | score_dimensions 修改对历史影响未说明 | 采纳 | 仅影响后续评分，历史按原维度展示，前端兼容缺失/额外维度（5.4 已改） |
+| 13 | 前端 reused 避免重复轮询 | 采纳（记录） | 前端维护活跃 job_id 集合，reused 时复用已有轮询（S5 实现） |
