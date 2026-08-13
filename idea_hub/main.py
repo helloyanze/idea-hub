@@ -16,6 +16,8 @@ from .config import Config, load
 from .errors import AppError, INTERNAL, RATE_LIMITED
 from .routers.settings import router as settings_router
 from .routers.sources import router as sources_router
+from .routers.pipeline import router as pipeline_router
+from .routers.jobs import router as jobs_router
 
 
 _basic = HTTPBasic(auto_error=False)
@@ -135,6 +137,8 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(router)
     app.include_router(settings_router, dependencies=[Depends(require_auth)])
     app.include_router(sources_router, dependencies=[Depends(require_auth)])
+    app.include_router(pipeline_router, dependencies=[Depends(require_auth)])
+    app.include_router(jobs_router, dependencies=[Depends(require_auth)])
     app.add_middleware(
         CORSMiddleware,
         allow_origins=getattr(config, "cors_origins", ["http://localhost:5173"]),
