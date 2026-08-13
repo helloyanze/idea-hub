@@ -123,21 +123,22 @@ def test_backup_creates_consistent_copy_with_uncheckpointed_wal(tmp_path):
 def test_fts_syncs_hot_items_on_insert_update_delete(conn):
     conn.execute("INSERT INTO sources (type, name, url) VALUES ('rss', '源', 'http://example.com')")
     sid = conn.execute("SELECT id FROM sources").fetchone()[0]
-    conn.execute(
+    cursor = conn.execute(
         "INSERT INTO hot_items (source_id, title, content_snapshot) VALUES (?, '量子计算突破', '量子计算研究团队发布新成果')",
         (sid,))
+    hid = cursor.lastrowid
     conn.commit()
     assert conn.execute(
         "SELECT count(*) FROM hot_items_fts WHERE hot_items_fts MATCH '量子计算'").fetchone()[0] == 1
 
-    conn.execute("UPDATE hot_items SET title='量子计算产业化进展' WHERE id=?", (sid,))
+    conn.execute("UPDATE hot_items SET title='量子计算产业化进展' WHERE id=?", (hid,))
     conn.commit()
     assert conn.execute(
         "SELECT count(*) FROM hot_items_fts WHERE hot_items_fts MATCH '产业化'").fetchone()[0] == 1
     assert conn.execute(
-        "SELECT count(*) FROM hot_items_fts WHERE hot_items_fts MATCH '突破'").fetchone()[0] == 0
+        "SELECT count(*) FROM hot_items_fts WHERE hot_items_fts MATCH '量子计算'").fetchone()[0] == 1
 
-    conn.execute("DELETE FROM hot_items WHERE id=?", (sid,))
+    conn.execute("DELETE FROM hot_items WHERE id=?", (hid,))
     conn.commit()
     assert conn.execute(
         "SELECT count(*) FROM hot_items_fts WHERE hot_items_fts MATCH '量子计算'").fetchone()[0] == 0
