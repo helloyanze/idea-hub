@@ -72,3 +72,23 @@ def test_expire_at_backfill(tmp_path):
     conn.commit()
     row = models.get_task(conn, tid)
     assert row["expire_at"] == "2026-08-14T00:00:00"
+
+def test_migration_idempotent(tmp_path):
+    """同一连接重复 init_schema 不应抛异常，且 tasks 表结构不变（迁移幂等）。"""
+    conn = _fresh_db(tmp_path)
+    before = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    db.init_schema(conn)  # 第二次执行迁移
+    after = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    assert before == after
+
+def test_create_task_uses_utc_default(tmp_path):
+    """create_task 的 created_at/updated_at 应来自表默认 datetime('now')（UTC），
+    与 update_task 等写入方一致，避免同列混用时区导致日账偏移/updated_at<created_at。"""
+    conn = _fresh_db(tmp_path)
+    before = conn.execute("SELECT datetime('now') AS t").fetchone()["t"]
+    tid = models.create_task(conn, title="t", idea_summary="s", target_id=1,
+                             feasibility_score=9, score_breakdown="{}")
+    after = conn.execute("SELECT datetime('now') AS t").fetchone()["t"]
+    row = models.get_task(conn, tid)
+    assert row["created_at"] == row["updated_at"]
+    assert before <= row["created_at"] <= after

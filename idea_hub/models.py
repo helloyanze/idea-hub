@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 STATUSES = ("archived", "todo", "waiting", "in_progress", "done")
 SCORE_THRESHOLD = 6          # 历史兼容：旧任务/relate 升级用（>=6 可升待办）
@@ -24,13 +24,12 @@ def create_task(conn, *, title, idea_summary, target_id, hot_item_id=None,
             "WHERE h.id=? AND s.ttl_hours IS NOT NULL", (hot_item_id,)).fetchone()
         if row and row["e"]:
             expire_at = row["e"].replace(" ", "T")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute(
         "INSERT INTO tasks (title, idea_summary, idea_path, hot_item_id, target_id, status, "
-        "feasibility_score, score_breakdown, notes, content_type, expire_at, "
-        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "feasibility_score, score_breakdown, notes, content_type, expire_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (title, idea_summary, idea_path, hot_item_id, target_id, status,
-         feasibility_score, score_breakdown, notes, content_type, expire_at, now, now))
+         feasibility_score, score_breakdown, notes, content_type, expire_at))
     tid = cur.lastrowid
     if hot_item_id is not None:
         conn.execute("INSERT OR IGNORE INTO task_links (task_id, hot_item_id) VALUES (?,?)",
@@ -197,7 +196,7 @@ def clear_old_notifications(conn, days=30):
 
 def daily_token_used(conn, date_str=None):
     if date_str is None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = conn.execute(
         "SELECT COALESCE(SUM(token_used),0) AS t FROM tasks WHERE date(updated_at)=?",
         (date_str,)).fetchone()
