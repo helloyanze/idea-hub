@@ -142,6 +142,9 @@ def _llm_key():
     return ""
 
 
+llm_key = _llm_key  # 公共别名：executor 等模块使用（不破坏现有 _llm_key 调用）
+
+
 def llm_score_batch(items, session=None, api_key=None, model=LLM_MODEL, timeout=60):
     """批量评分：输入 items（含 title/summary），输出 {index: (fact, verify_need)}。
 
