@@ -178,7 +178,7 @@ web/
 ### 5.5 异步 job 生命周期
 
 - 状态流转：pending → running → done/failed
-- 心跳：job 运行期间每 30s 更新 heartbeat_at
+- 心跳：子步骤边界更新（每处理完一个 candidate / 一篇产物 / 一个来源）及 LLM 调用前；LLM 单次调用超时 120s，重试前刷新心跳；stale 阈值 5min 不变（单步耗时 < 5min，不会误判）
 - 崩溃恢复：调度器 tick 发现 running 且 heartbeat_at 超过 5 分钟未更新 → 标记 failed + 写通知
 - job 去重：同类型 job 已有 running 时，POST 返回已有 job_id（不新建）
 - result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
@@ -251,7 +251,15 @@ POST /api/v1/notifications/read-all
 GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 ```
 
-### 6.7 统一约定
+### 6.7 统一搜索
+
+```
+GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
+```
+
+实现：三张 FTS 表分别 MATCH 后 UNION（rank 排序）；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。
+
+### 6.8 统一约定
 
 - 长任务端点一律异步：立即返回 job_id，不阻塞 HTTP 请求
 - 写操作幂等：collect/generate/execute 重复触发不重复产出（同类型 running job 去重，返回已有 job_id；执行器幂等兜底）
@@ -279,6 +287,8 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 | 来源管理 | 渠道 CRUD + 启停 + 测试抓取 + 渠道预设 |
 | 通知中心 | 列表 + 已读/未读 + 角标 + 实体跳转 |
 | 统计页 | token 用量、队列计数、今日产出、调度器健康条 |
+
+- 全局搜索框（布局壳顶部）：跨热点/任务/产物统一检索，结果按 entity_type 跳转
 
 ### 7.3 评分展示组件
 
@@ -309,7 +319,7 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 | S4 生成 | 生成编排本地化（DeepSeek 直调 + prompt 模板）+ 标签 + generate 异步 job | idea 进看板 |
 | S5 看板 | 四列看板 + 拖拽 + 搜索 + 任务详情 + 评分组件 + 过期处理 | 完整看板可用 |
 | S6 执行+产物 | 执行器重构 + outputs 表（版本化）+ markdown 编辑器 + 下载/上传/版本 + 读时校验 | 产物全链路 |
-| S7 通知+统计 | 通知事件写入（含实体关联）+ 统计页 + 调度器健康 + discard 清理 | Hermes 可巡检 |
+| S7 通知+统计+搜索 | 通知事件写入（含实体关联）+ 统计页 + 调度器健康 + discard 清理 + 统一搜索端点 | Hermes 可巡检，全局搜索可用 |
 | S8 部署 | cron 脚本 + 部署文档 + QQ bot 对接验证 + 限流验证 | 云端全自动 |
 
 ## 9. 错误处理
@@ -342,7 +352,7 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 4. 产物编辑：Web 编辑 → 落盘文件一致性、版本递增正确性、乐观锁 409（S6 验收）
 5. 评分展示美观性、暗色模式、移动端适配（S5 验收）
 6. 幂等性：重复触发 collect/generate/execute 不产生重复数据
-7. FTS5 搜索：热点/任务/产物搜索准确性、外部改文件后索引刷新（S5/S6 验收）
+7. FTS5 搜索：统一搜索端点跨热点/任务/产物准确性、entity_type 标注与跳转、外部改文件后索引刷新（S5/S6/S7 验收）
 8. 异步任务：长任务 job 进度可见、失败降级、SSE/轮询正常（S2-S6 验收）
 9. 过期处理：expire_at 自动完成 + 通知；discard 7 天清理（S5/S7 验收）
 10. 云端全自动运行稳定性：生成不依赖 Hermes 在线（S8 验收）
@@ -404,3 +414,10 @@ GET  /api/v1/health                          # 调度器心跳 + 数据库健康
 | 8 | hot_items 去重未定义 | 采纳 | UNIQUE(source_id, url) + 服务层 URL 去重（5.1 已改） |
 | 9 | job 去重机制未说明 | 采纳 | 同类型 running 存在时返回已有 job_id（5.5/6.7 已改） |
 | 10 | settings.value 无类型 | 采纳 | 加 value_type 列（int/float/string/json）（5.1 已改） |
+
+### 第三轮审阅回应（2026-08-14）
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | 缺统一搜索 API：FTS5 已建好无消费入口 | 采纳 | 新增 GET /api/v1/search?q=&page=&size=，UNION 三表，每条标注 entity_type + entity_id，前端可跳转（6.7 已加，S7 交付） |
+| 2 | 心跳 30s 定时与阻塞 LLM 调用冲突，会被误判崩溃 | 采纳 | 心跳改为子步骤边界 + LLM 调用前更新；LLM 单次超时 120s，重试前刷新心跳；stale 阈值 5min 不变，单步耗时 < 5min 不误判（5.5 已改） |
