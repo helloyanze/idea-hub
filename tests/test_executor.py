@@ -1,4 +1,5 @@
 """常规执行器：幂等/生成/质检重试/规则层/版本保留/失败计数。"""
+import httpx
 import json
 import os
 import sqlite3
@@ -114,9 +115,63 @@ def test_ai_taste_rule_triggers_regenerate(tmp_path):
     assert models.get_task(conn, tid)["status"] == "done"
 
 def test_call_llm_timeout_raises():
-    with patch("httpx.post", side_effect=TimeoutError("timeout")):
+    # httpx 真实超时抛 httpx.ReadTimeout（TimeoutException 子类，非内置 TimeoutError），
+    # 契约要求 call_llm 将其转换为内置 TimeoutError
+    with patch("httpx.post", side_effect=httpx.ReadTimeout("timeout")):
         try:
             executor.call_llm("prompt", timeout=1)
             assert False, "应抛异常"
         except TimeoutError:
             pass
+
+def test_empty_output_not_idempotent(tmp_path):
+    """output.md 存在但 size=0（空文件）→ 不走幂等分支，走正常生成流程。"""
+    conn, tid = _setup(tmp_path)
+    d = Path(tmp_path) / "outputs" / "tasks" / str(tid)
+    (d / "output.md").write_text("", encoding="utf-8")  # 空文件 st_size=0
+    payload = json.dumps({"title": "新标题", "content": "正文内容" * 100,
+                          "word_count": 300}, ensure_ascii=False)
+    qa_ok = json.dumps({"pass": True, "issues": [], "suggestions": ""})
+    seq = [(payload, 1000), (qa_ok, 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq.pop(0)):
+        rc = executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path))
+    assert rc == 0
+    assert models.get_task(conn, tid)["status"] == "done"
+    assert (d / "output.md").read_text(encoding="utf-8") == "正文内容" * 100
+
+def test_qa_parse_failure_fails_task(tmp_path):
+    """质检输出非 JSON → 解析失败视为不通过，重试仍失败 → 任务退回 waiting。"""
+    conn, tid = _setup(tmp_path)
+    payload = json.dumps({"title": "t", "content": "差内容" * 100, "word_count": 300})
+    seq = [(payload, 1000), ("这不是 JSON 的质检输出", 300),
+           (payload, 1000), ("这不是 JSON 的质检输出", 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq.pop(0)):
+        rc = executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path))
+    assert rc == 1
+    task = models.get_task(conn, tid)
+    assert task["status"] == "waiting"
+    assert task["fail_count"] == 1
+    assert "质检" in task["last_fail_reason"]
+
+def test_fail_then_complete_accumulates_token_used(tmp_path):
+    """失败(打回 waiting)后再次执行成功的场景：token_used 应两轮累加而非被覆盖。"""
+    conn, tid = _setup(tmp_path)
+    payload = json.dumps({"title": "t", "content": "差内容" * 100, "word_count": 300})
+    qa_bad = json.dumps({"pass": False,
+                         "issues": [{"type": "structure", "quote": "开头",
+                                     "problem": "无钩子", "fix": "加钩子"}],
+                         "suggestions": "重写"})
+    seq1 = [(payload, 1000), (qa_bad, 300), (payload, 1000), (qa_bad, 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq1.pop(0)):
+        assert executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path)) == 1
+    assert models.get_task(conn, tid)["token_used"] == 2600
+    # 打回后调度再次 start → in_progress
+    models.move_task(conn, tid, "in_progress")
+    payload_ok = json.dumps({"title": "t2", "content": "好内容" * 100, "word_count": 300})
+    qa_ok = json.dumps({"pass": True, "issues": [], "suggestions": ""})
+    seq2 = [(payload_ok, 1000), (qa_ok, 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq2.pop(0)):
+        assert executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path)) == 0
+    task = models.get_task(conn, tid)
+    assert task["status"] == "done"
+    assert task["token_used"] == 3900  # 2600(失败轮) + 1300(成功轮)

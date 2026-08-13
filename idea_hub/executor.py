@@ -6,7 +6,7 @@ import sys
 
 import httpx
 
-from idea_hub import db, models, notify, prompts
+from idea_hub import db, models, prompts
 from idea_hub.scorer import LLM_URL, LLM_MODEL, llm_key
 
 LLM_TIMEOUT = 120
@@ -19,12 +19,17 @@ def call_llm(prompt, *, timeout=LLM_TIMEOUT):
     key = llm_key()
     if not key:
         raise RuntimeError("DEEPSEEK_API_KEY 未配置")
-    resp = httpx.post(LLM_URL, timeout=timeout,
-                      headers={"Authorization": f"Bearer {key}"},
-                      json={"model": LLM_MODEL, "messages": [
-                          {"role": "user", "content": prompt}],
-                          "temperature": 0.7,
-                          "response_format": {"type": "json_object"}})
+    try:
+        resp = httpx.post(LLM_URL, timeout=timeout,
+                          headers={"Authorization": f"Bearer {key}"},
+                          json={"model": LLM_MODEL, "messages": [
+                              {"role": "user", "content": prompt}],
+                              "temperature": 0.7,
+                              "response_format": {"type": "json_object"}})
+    except httpx.TimeoutException as exc:
+        # 契约：超时统一抛内置 TimeoutError（httpx 的 ReadTimeout/ConnectTimeout 等
+        # 均非 TimeoutError 子类，需在此转换）
+        raise TimeoutError("LLM 调用超时") from exc
     resp.raise_for_status()
     data = resp.json()
     content = data["choices"][0]["message"]["content"]
@@ -61,8 +66,10 @@ def _version_output(base_path, task_id):
 
 def _complete_task(conn, task_id, summary, output_path, token_used):
     rel = str(pathlib.Path("outputs") / "tasks" / str(task_id) / "output.md").replace("\\", "/")
+    task = models.get_task(conn, task_id)
     models.update_task(conn, task_id, ai_summary=summary, output_path=rel,
-                       token_used=token_used, fail_count=0, last_fail_reason=None)
+                       token_used=(task["token_used"] or 0) + token_used,
+                       fail_count=0, last_fail_reason=None)
     models.move_task(conn, task_id, "done")
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
                  (task_id,))
@@ -97,15 +104,17 @@ def execute_task(db_path, task_id, base_path):
         task = models.get_task(conn, task_id)
         if task is None:
             print(f"error: task {task_id} not found", file=sys.stderr)
+            conn.close()
             return 1
         if task["status"] != "in_progress":
             print(f"skip: task {task_id} status={task['status']}", file=sys.stderr)
+            conn.close()
             return 1
         d = pathlib.Path(base_path) / "outputs" / "tasks" / str(task_id)
         if not task.get("redo_note") and (d / "output.md").exists() and (d / "output.md").stat().st_size > 0:
             # 幂等：产出已存在且非打回重做（如 complete 网络中断后重跑）→ 直接完成
-            _complete_task(conn, task_id, task.get("ai_summary") or "已完成", d / "output.md",
-                           task.get("token_used") or 0)
+            # token_used 传 0：_complete_task 会累加现值，保留此前累计 token
+            _complete_task(conn, task_id, task.get("ai_summary") or "已完成", d / "output.md", 0)
             conn.close()
             return 2
 
