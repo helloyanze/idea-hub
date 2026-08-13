@@ -128,7 +128,7 @@ web/
 | 表 | 字段要点 | 说明 |
 |---|---|---|
 | `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口（见 5.4） |
-| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date = DATE(collected_at) 冗余列，专供 discard 清理查询避免函数索引，建 (verdict, collected_date) 联合索引；UNIQUE(source_id, url) 防重复 |
+| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, score_breakdown, verdict, collected_date | verdict: admit/discard；score_breakdown 为评分阶段写入的维度明细（JSON，与 tasks 格式一致）；content_snapshot 截断至 2000 字符；collected_date = DATE(collected_at) 冗余列，专供 discard 清理查询避免函数索引，建 (verdict, collected_date) 联合索引；UNIQUE(source_id, url) 防重复 |
 | `tasks` | id, title, idea_summary, ai_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4；content_type 枚举、score_breakdown 格式、idea_summary/ai_summary 语义见 5.4；落盘路径均为固定模式由 task_id 推导（idea: outputs/tasks/<id>/idea.md，output: outputs/tasks/<id>/output.md），不存字段 |
 | `task_links` | task_id, hot_item_id | 多对多关联 |
 | `tags` | id, name UNIQUE, color | name 唯一约束 |
@@ -165,10 +165,11 @@ web/
 | todo | - | 允许 | 允许 | 允许（人工） |
 | waiting | 允许 | - | 允许 | 允许（人工/过期） |
 | in_progress | 禁止 | 允许（执行失败回退） | - | 允许（完成） |
-| done | 允许（拖拽回炉，不动 fail_count） | 禁止 | 禁止 | - |
+| done | 允许（拖拽回炉，不动 fail_count） | 禁止 | 允许（仅限无产物补执行，条件 UPDATE 限定） | - |
 
 - 状态变更仅通过 move 操作；进入 done 时记录 completed_at
 - 执行失败：执行器将任务 in_progress → waiting（fail_count + 1，last_fail_reason 记录），不引入 failed 状态
+- 补执行：done 且无产物的任务允许直接触发 execute（done → in_progress，条件 UPDATE 限定 status='done' AND 无 outputs 行），视为补产出
 - 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 todo/waiting → done，备注"已过期"并写通知；in_progress 跳过并发警告（避免与执行器写回冲突）
 - redo 与 reset-failures 遵循 6.3 前置条件（done 或 fail_count > 0），与上表不冲突（专用端点，不走 move）
 
@@ -178,6 +179,7 @@ web/
 - 双写：outputs 表每版本一行（content 缓存 + file_mtime + file_hash）
 - Web 编辑（PUT）/ 上传：写新版本行（version = max+1）+ 更新落盘文件 + FTS 经触发器刷新
 - 外部文件变更检测：读取产物时以文件为准，对比 file_mtime/file_hash，不一致则回写 DB 与 FTS，**不递增版本**（更新当前版本行内容，防编辑器自动保存产生垃圾版本）；不做常驻 watchdog（个人系统，读时校验足够）
+- 文件不存在分支：读时校验发现落盘文件缺失（外部误删/恢复不完整）→ 从 DB outputs 表最新版本重建文件，再按正常流程继续
 - FTS 索引范围：outputs_fts 仅索引每个 task 的最新版本（触发器判断 version = MAX），FTS 中每个 task 至多一行，避免版本行膨胀与分组复杂度
 - outputs_fts 触发器实现策略（SQLite external content 限制）：AFTER INSERT/UPDATE 时若新行是最新版本（version = MAX），先 DELETE 该 task 旧 FTS 行（按旧行 id 定位：SELECT id FROM outputs WHERE task_id=NEW.task_id AND id<>NEW.id ORDER BY version DESC LIMIT 1，DELETE FROM outputs_fts WHERE rowid=旧id），再 INSERT 新行（rowid=NEW.id）；AFTER DELETE 触发器按 rowid=OLD.id 删除对应 FTS 行
 
@@ -185,18 +187,25 @@ web/
 
 - `sources.ttl_hours`：该来源热点的时效窗口（小时）。热点 expire_at = collected_at + ttl_hours（动态计算，不落库）；过期热点不再作为生成候选；不参与删除（保留历史）。注意：修改 ttl_hours 会影响该来源全部历史热点的时效判定
 - `tasks.expire_at`：任务时效。过期任务由调度器自动完成（move → done + 通知），仅限 todo/waiting；in_progress 跳过并发警告；人工操作不受限
+- `tasks.expire_at` 赋值：generate 创建任务时 = 关联热点 collected_at + source.ttl_hours（热点无 ttl_hours 或手动建任务则不设置，为 NULL 表示不过期）；手动建任务 API 支持可选 expire_at
 - `hot_items.content_snapshot`：截断至 2000 字符，防长文膨胀 FTS 索引
 - `hot_items` 清理策略：discard 热点保留 7 天，调度器每日清理（删行 + FTS 触发器同步）
 - `tasks.content_type` 枚举：article（文章，默认）/ video_script（视频脚本）/ tweet（短文）/ newsletter（简报）；生成时由 LLM 根据热点类型与 target_desc 判定，手动建任务可指定
 - `tasks.score_breakdown`：JSON 字符串，多维评分明细，如 {"facts": 8, "verification": 7, "timeliness": 9, "value": 8}；维度来源 = settings.score_dimensions（JSON 数组，默认 ["facts","verification","timeliness","value"]，可运行时调整）；feasibility_score = 各维度加权均值（四舍五入）。维度不随 target_desc 变化（target_desc 仅文本描述，不承载配置）
+- 评分数据链：评分阶段（S3）写入 hot_items.score_breakdown + final_score；generate 从热点创建任务时继承 score_breakdown 写入 tasks（feasibility_score = final_score）；手动建任务不评分，score_breakdown 为空（评分组件显示"未评分"态）
+- 评分权重：默认等权均值（各维度权重 1）；score_dimensions 保持名称数组，暂不支持权重配置
 - `tasks.idea_summary`：生成阶段 LLM 产出的一句话摘要（构思主题）；`tasks.ai_summary`：执行完成后 AI 对成文的总结（文章要点）；两者均入 FTS 索引
 - idea 文件管理：构思全文落盘 outputs/tasks/<id>/idea.md（固定模式），由 generate 服务（S4）随任务创建时写入；不版本化、不做外部变更检测（只读中间产物）
 - `notifications.type` 枚举：collect_done / generate_done / execute_done / job_failed / task_expired / budget_exceeded / discard_cleaned（可扩展）
 - `notifications.level` 枚举：info / warn / error；前端角标颜色：info 蓝 / warn 黄 / error 红
 - 产物首版创建：执行器执行完成写产物时创建 version=1；编辑器打开无产物时 GET /output 返回 {content: null, version: 0}，PUT 时 base_version=0 表示创建首版
+- `outputs.filename` 用途：执行器首版 = "output.md"；上传替换时保存原始文件名（展示与导出用）；导出历史版本下载文件名 = filename
 - 版本递增原子性：PUT/upload 在同一事务内 SELECT MAX(version) → 校验 base_version == MAX → INSERT (MAX+1)，依赖 UNIQUE(task_id, version) 约束兜底，冲突返回 409
 - `sources.keywords`：关键词白名单（逗号分隔），标题包含任一关键词才收录；空 = 不过滤；仅匹配标题，不匹配正文
-- `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零；jobs.token_used 仅用于 collect/generate 类型 job（执行类型 job 的 token 全部计入 tasks.token_used，jobs.token_used 保持 NULL，避免重复统计）；stats 汇总 = SUM(tasks.token_used) + SUM(jobs.token_used WHERE type IN ('collect','generate'))
+- `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零
+- `jobs.token_used`：全部类型 job 均记录（collect/generate/execute）；execute job 的 token 同时写 tasks.token_used 与 jobs.token_used（双写）
+- stats 汇总去重：执行累计 = SUM(tasks.token_used)；生成/评分累计 = SUM(jobs.token_used WHERE type IN ('collect','generate'))；展示两数分列，不直接相加
+- 每日预算基础：今日消耗 = SUM(jobs.token_used WHERE date(created_at)=today)（含 execute，按日可准确聚合）
 
 ### 5.5 异步 job 生命周期
 
@@ -206,6 +215,8 @@ web/
 - 崩溃恢复并发安全：标记 failed 用条件 UPDATE（WHERE status='running' AND heartbeat_at < 阈值），rowcount=0 则跳过（job 可能已恢复或已结束），与 6.8 原子变更一致
 - job 去重：同类型 job 已有 running 时，POST 返回已有 job_id（不新建）
 - result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
+- 调度器持久化（settings 内部键，不通过 PUT 修改）：scheduler_last_tick（每次 tick 更新，/health 判断存活：超过 10 分钟未更新判不健康）；scheduler_last_collect（上次 collect 触发时间，与 collect_interval_hours 配合决定是否触发 collect）
+- 收集频率执行机制：cron 按基础频率（每 5 分钟）唤醒 scheduler tick；tick 读取 collect_interval_hours，距 scheduler_last_collect 超过间隔则触发 collect job 并更新该键——动态参数真正生效
 
 ## 6. API 设计（/api/v1）
 
@@ -237,13 +248,14 @@ q= 走 hot_items_fts 单表检索（页面内过滤）；跨表全局搜索用 /
 
 ```
 GET    /api/v1/tasks?status=&page=&size=&q=&tag=
-GET    /api/v1/tasks/{id}                    # 详情（含 tags、关联热点、产物）
-POST   /api/v1/tasks                         # 手动建任务：必填 title、content_type；可选 idea_summary、feasibility_score（默认 0）、score_breakdown、target_desc、notes、hotspot_id（关联热点）；status 默认 todo
+GET    /api/v1/tasks/{id}                    # 详情（含 tags、关联热点摘要、产物摘要 {has_output, latest_version, version_count, ai_summary}；正文不随详情返回，编辑器单独 GET /output）
+POST   /api/v1/tasks                         # 手动建任务：必填 title、content_type；可选 idea_summary、feasibility_score（默认 0）、score_breakdown、target_desc、notes、hotspot_id（关联热点）、expire_at（不设 = NULL 不过期）；status 默认 todo
 PATCH  /api/v1/tasks/{id}                    # 编辑（标题/摘要/评分/备注）
 DELETE /api/v1/tasks/{id}                    # 级联：删 task_links、task_tags、outputs 行与落盘文件（outputs/tasks/<id>/ 目录）；notifications 与 jobs 历史保留（跳转 404 时提示"任务已删除"）
 POST   /api/v1/tasks/{id}/move      {to_status}
-PUT    /api/v1/tasks/{id}/tags      {tag_ids}    # 替换语义：设置任务全部标签（重传完整数组）
-POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）
+GET    /api/v1/tags                          # 标签列表（含颜色）
+PUT    /api/v1/tasks/{id}/tags      {names: []}  # 替换语义：按名称 upsert（不存在自动创建，颜色从调色板轮转分配），设置任务全部标签
+POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）；允许前置状态：todo / waiting / done（仅限无产物补执行）；in_progress 409
 POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：仅限 done 或 fail_count > 0（无 failed 状态）；status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）；其他 409
 POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数：仅限 fail_count > 0；其他 409（区别于 redo：不改变状态）
 ```
@@ -304,7 +316,7 @@ settings 初始键（S1 schema 初始化时写入，PUT 仅允许更新预定义
 GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 ```
 
-实现：三张 FTS 表分别 MATCH 后 UNION；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。排序：先按 entity_type 分组展示（组内按 bm25 rank 排序）——不同表的 bm25 分数不可直接跨表比较，不做跨表统一排序。
+实现：三张 FTS 表分别 MATCH 后 UNION；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。排序：先按 entity_type 分组展示（组内按 bm25 rank 排序）——不同表的 bm25 分数不可直接跨表比较，不做跨表统一排序。output 类型结果的 entity_id = task_id（前端跳转任务详情；outputs_fts 的 task_id UNINDEXED 列提供该值，不用 outputs.id）。
 
 与单表搜索的关系：/hotspots?q=、/tasks?q= 为单表 FTS 检索（页面内过滤），/search 为三表 UNION 全局检索；共用同一匹配实现，仅作用域不同。
 
@@ -319,7 +331,8 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - execute 幂等兜底：执行器启动前检查 outputs 表——该 task 已有产物行且 status=done → 跳过（视为已执行）；status=done 但无产物（手动移入）→ 允许执行；redo 重置状态后重新可执行
 - DELETE source 并发安全：检查关联 → 删除在事务内完成（BEGIN IMMEDIATE check-then-delete）；collect job 仅处理 enabled=1 的来源（删除前需先 toggle 禁用，天然避免写入竞态）
 - job 部分成功语义：批量 job 部分失败 → 状态 done + result_ref 含 failed_items 明细（[{"task_id": 5, "error": "..."}]）；全部失败 → failed；error 字段存整体错误或首个错误
-- 每日预算闭环：execute job 启动时检查（今日 SUM(jobs.token_used collect/generate) + 预估执行成本 > daily_budget_tokens → job 直接 failed + budget_exceeded 通知，不执行）；执行中达到预算则停止后续任务，已完成保留
+- 部分成功通知规则：全部成功 → info（execute_done/generate_done）；部分失败 → warn（同类型事件 + failed_items 数量摘要）；全部失败 → error（job_failed）。每批 job 写一条聚合通知
+- 每日预算闭环：execute job 启动时检查（今日消耗 = SUM(jobs.token_used WHERE date(created_at)=today)（含 execute）+ 预估执行成本 > daily_budget_tokens → job 直接 failed + budget_exceeded 通知，不执行）；执行中达到预算则停止后续任务，已完成保留
 - SQLite 外键：db.py 连接时 PRAGMA foreign_keys=ON；级联删除不依赖 ON DELETE CASCADE（需同步 FTS 触发器），由 services 层显式事务删除
 
 ## 7. 前端设计
@@ -351,6 +364,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 
 - 多维评分（事实性/验证需求/时效性等）用分组条形图 + 总分徽章
 - 数值色阶：>=8 绿、6-7 黄、<6 红
+- 未评分态：score_breakdown 为空时显示"未评分"占位（手动建任务）
 
 ### 7.4 长任务交互
 
@@ -361,7 +375,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 
 - 看板列数据独立拉取、卡片组件 memo 化、拖拽不整页重渲染
 - 交互目标：点击无感知延迟
-- done 列加载策略：默认仅加载最近 50 条（completed_at 降序）+ "加载更多"分页；拖拽到 done 的新任务乐观插入列顶；其余列数量少，全量加载
+- done 列加载策略：从 GET /settings 读取 done_column_limit（读取失败回退 50），默认仅加载最近 N 条（completed_at 降序）+ "加载更多"分页；拖拽到 done 的新任务乐观插入列顶；其余列数量少，全量加载
 
 ### 7.6 移动端
 
@@ -598,3 +612,35 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 14 | sources.keywords 语义未定义 | 采纳 | 标题关键词白名单（逗号分隔），空 = 不过滤，仅匹配标题（5.4 已改） |
 | 15 | SQLite 外键约束未说明 | 采纳 | PRAGMA foreign_keys=ON；级联删除由 services 显式事务处理（6.8 已改） |
 | 16 | 前端 Basic Auth 凭据管理未定义 | 采纳 | 登录表单 + localStorage 存凭据 + 401 回登录页（7.1 已改） |
+
+### 第七轮审阅回应（2026-08-14）
+
+高优先级（数据链 / 状态机闭环）：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | done→in_progress 禁止与 execute 兜底矛盾 | 采纳 | 矩阵放开 done → in_progress 仅限无产物补执行（条件 UPDATE 限定 status='done' AND 无 outputs 行）；execute 允许 todo/waiting/done(无产物)，in_progress 409（5.2/6.3 已改） |
+| 2 | 评分明细数据链断裂 | 采纳 | hot_items 增加 score_breakdown（评分阶段写入）；generate 继承到 tasks（feasibility_score = final_score）；手动任务为空显示未评分（5.1/5.4/7.3 已改） |
+| 3 | 每日执行预算统计不可实现 | 采纳 | jobs.token_used 覆盖全部类型（execute 双写 tasks+job）；今日消耗 = SUM(jobs.token_used WHERE date(created_at)=today)；stats 两数分列展示防重复（5.4/6.8 已改） |
+| 4 | expire_at 赋值来源未定义 | 采纳 | generate 继承热点 collected_at + ttl_hours；手动任务 API 加可选 expire_at；NULL = 不过期（5.4/6.3 已改） |
+| 5 | tags 无创建来源 | 采纳 | 新增 GET /tags；PUT /tasks/{id}/tags 改按名称 upsert（自动创建 + 调色板轮转颜色）（6.3 已改） |
+
+中优先级（执行机制 / 数据源）：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 6 | collect_interval_hours 无执行机制 | 采纳 | cron 每 5 分钟唤醒 tick；tick 读 collect_interval_hours 与 scheduler_last_collect 决定是否触发 collect（5.5 已改） |
+| 7 | 调度器健康缺持久化数据源 | 采纳 | settings 内部键 scheduler_last_tick（tick 每次更新，/health 超 10 分钟判不健康）（5.5 已改） |
+| 8 | 评分维度权重未定义 | 采纳 | 默认等权均值，score_dimensions 为名称数组，暂不支持权重（5.4 已改） |
+| 9 | outputs.filename 用途未定义 | 采纳 | 首版 "output.md"；上传保存原始名；导出下载用 filename（5.4 已改） |
+| 10 | 统一搜索 output entity_id 指向不明 | 采纳 | output 结果 entity_id = task_id（跳转任务详情），由 outputs_fts.task_id 列提供（6.7 已改） |
+| 11 | 文件缺失恢复未写入 5.3 | 采纳 | 5.3 增加文件不存在分支：从 DB 最新版本重建（5.3 已改） |
+| 12 | done_column_limit 与前端硬编码不一致 | 采纳 | 前端从 GET /settings 读取，失败回退 50（7.5 已改） |
+
+低优先级：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 13 | GET /tasks/{id} 产物返回内容未定义 | 采纳 | 详情含产物摘要（has_output/latest_version/version_count/ai_summary），正文单独 GET（6.3 已改） |
+| 14 | 部分成功通知规则未定义 | 采纳 | 全成功 info / 部分失败 warn / 全失败 error，每批一条聚合通知（6.8 已改） |
+| 15 | settings 未知键拒绝的演进提示 | 采纳（记录） | 新增动态参数需同步 schema 初始化；实施时保持初始化集中管理（S1 实现） |
