@@ -50,17 +50,6 @@ def load(path: str | None = None) -> Config:
             if key in file_values:
                 values[key] = file_values[key]
 
-        for key in ("port", "rate_limit_per_min"):
-            if key in file_values:
-                file_value = file_values[key]
-                try:
-                    converted_value = int(file_value)
-                except (ValueError, TypeError) as error:
-                    raise ConfigError(f"{key} must be an integer") from error
-                if type(file_value) is not int:
-                    raise ConfigError(f"{key} must be an integer")
-                values[key] = converted_value
-
     environment_overrides = {
         "DEEPSEEK_API_KEY": "deepseek_api_key",
         "IDEAHUB_AUTH_USER": "auth_user",
@@ -76,6 +65,16 @@ def load(path: str | None = None) -> Config:
             values["port"] = int(os.environ["IDEAHUB_PORT"])
         except ValueError as error:
             raise ConfigError("IDEAHUB_PORT must be an integer") from error
+
+    for key in ("port", "rate_limit_per_min"):
+        value = values[key]
+        try:
+            converted_value = int(value)
+        except (ValueError, TypeError) as error:
+            raise ConfigError(f"{key} must be an integer") from error
+        if type(value) is not int:
+            raise ConfigError(f"{key} must be an integer")
+        values[key] = converted_value
 
     if path is not None and file_exists and not values["auth_user"]:
         raise ConfigError("auth_user is required in an explicit configuration file")

@@ -118,3 +118,26 @@ def test_yaml_numeric_port_and_rate_limit_load(tmp_path):
     cfg = config.load(_write_yaml(tmp_path, yaml_text))
     assert cfg.port == 9000
     assert cfg.rate_limit_per_min == 30
+
+
+def test_yaml_port_string_with_env_override_loads_env_value(tmp_path, monkeypatch):
+    """An environment port override replaces a quoted YAML port."""
+    monkeypatch.setenv("IDEAHUB_PORT", "8080")
+    yaml_text = 'auth_user: "admin"\nport: "8000"\n'
+    cfg = config.load(_write_yaml(tmp_path, yaml_text))
+    assert cfg.port == 8080
+
+
+def test_yaml_port_null_with_env_override_loads_env_value(tmp_path, monkeypatch):
+    """An environment port override replaces a null YAML port."""
+    monkeypatch.setenv("IDEAHUB_PORT", "8080")
+    yaml_text = 'auth_user: "admin"\nport: null\n'
+    cfg = config.load(_write_yaml(tmp_path, yaml_text))
+    assert cfg.port == 8080
+
+
+def test_yaml_port_string_raises_without_env(tmp_path):
+    """A quoted YAML port remains invalid without an environment override."""
+    yaml_text = 'auth_user: "admin"\nport: "8000"\n'
+    with pytest.raises(config.ConfigError, match="port must be an integer"):
+        config.load(_write_yaml(tmp_path, yaml_text))
