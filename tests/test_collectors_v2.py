@@ -15,7 +15,7 @@ from idea_hub.collectors import collect_all, collector_registry
 from idea_hub.collectors.base import BaseCollector, RawItem
 from idea_hub.collectors.github import GithubTrendingCollector
 from idea_hub.collectors.hackernews import HackerNewsCollector
-from idea_hub.collectors.hotlist import HotlistCollector
+from idea_hub.collectors.hotlist import HotlistCollector, _dig
 from idea_hub.collectors.rss import RssCollector
 
 # ---------- 真实 API 结构样例 ----------
@@ -218,3 +218,37 @@ def test_orchestrator_limit_per_source(conn, monkeypatch):
     assert len(result["items"]) == 1
     assert result["items"][0].title == "城市不仅要有高度 更要有温度"
     assert result["errors"] == []
+
+
+def test_dig_array_wildcard_flatten():
+    data = {"data": [{"target": "a"}, {"target": "b"}]}
+
+    assert _dig(data, "data[].target") == ["a", "b"]
+
+
+def test_dig_numeric_index_regression():
+    result = _dig(BAIDU_SAMPLE, "data.cards.0.content.0.content")
+
+    assert result == BAIDU_SAMPLE["data"]["cards"][0]["content"][0]["content"]
+    assert len(result) == 2
+
+
+def test_dig_mixed_path():
+    data = {
+        "data": [
+            {"items": [{"title": "a"}, {"title": "ignored"}]},
+            {"items": [{"title": "b"}]},
+        ]
+    }
+
+    assert _dig(data, "data[].items[0].title") == ["a", "b"]
+
+
+def test_dig_missing_path():
+    assert _dig({}, "data[].target") == []
+    assert _dig({}, "data.cards.0.content") is None
+    assert _dig({"data": [{"other": "value"}]}, "data[].target") == []
+
+
+def test_dig_wildcard_at_end():
+    assert _dig({"data": [1, 2, 3]}, "data[]") == [1, 2, 3]

@@ -4,14 +4,58 @@ from idea_hub.collectors.base import BaseCollector, RawItem
 
 
 def _dig(obj, path):
-    for part in path.split("."):
-        if isinstance(obj, dict):
-            obj = obj.get(part)
-        elif isinstance(obj, list) and part.isdigit():
-            obj = obj[int(part)]
-        else:
-            return None
-    return obj
+    parts = path.split(".")
+    has_wildcard = any(part.endswith("[]") for part in parts)
+
+    def resolve(value, remaining):
+        if not remaining:
+            return value, False
+
+        part = remaining[0]
+        rest = remaining[1:]
+
+        if part.endswith("]") and "[" in part:
+            key, bracket = part[:-1].rsplit("[", 1)
+            if key:
+                if not isinstance(value, dict):
+                    return None, False
+                value = value.get(key)
+
+            if bracket == "":
+                if not isinstance(value, list):
+                    return [], True
+                results = []
+                for item in value:
+                    result, expanded = resolve(item, rest)
+                    if result is None:
+                        continue
+                    if expanded:
+                        results.extend(result)
+                    else:
+                        results.append(result)
+                return results, True
+
+            if bracket.isdigit():
+                if not isinstance(value, list):
+                    return None, False
+                index = int(bracket)
+                if index >= len(value):
+                    return None, False
+                return resolve(value[index], rest)
+
+        if isinstance(value, dict):
+            return resolve(value.get(part), rest)
+        if isinstance(value, list) and part.isdigit():
+            index = int(part)
+            if index >= len(value):
+                return None, False
+            return resolve(value[index], rest)
+        return None, False
+
+    result, _ = resolve(obj, parts)
+    if result is None and has_wildcard:
+        return []
+    return result
 
 
 class HotlistCollector(BaseCollector):
