@@ -216,13 +216,14 @@ uvicorn 启动时起后台 asyncio 任务，每 5 分钟 tick。
 | `last_fail_reason` | TEXT | NULL | 最近一次失败原因（Web 界面可见） |
 | `expire_at` | TEXT | NULL | 热点时效截止（ISO 时间）；过期任务调度时自动归档。生成时继承关联热点的时效，无关联热点可空（不失效） |
 | `token_used` | INTEGER | 0 | 本次执行累计消耗 token（含生成 + 质检重试），用于成本统计 |
+| `redo_note` | TEXT | NULL | 打回重做时用户的修改意见；执行器生成时注入 prompt |
 
 **settings 表新增配置项：**
 
 | key | 默认值 | 说明 |
 |---|---|---|
 | `auto_execute` | `'1'` | waiting 队列自动执行总开关（与 auto_run 独立：auto_run 管收集+生成，auto_execute 管执行调度） |
-| `max_per_tick` | `'1'` | 每轮 tick 最多领取任务数（领取数，非并发数；执行均为异步子进程） |
+| `max_concurrent` | `'1'` | 全局并行执行上限（同时处于 in_progress 的任务数上限；默认 1 = 严格串行）。领取前检查，达到上限则本轮不领 |
 | `max_fail_count` | `'3'` | 连续失败暂停阈值 |
 | `stale_simple_min` | `'5'` | 常规任务卡死回收阈值（分钟）——以 updated_at 为心跳 |
 | `stale_complex_min` | `'60'` | 复杂任务卡死回收阈值（分钟）——以 updated_at 为心跳 |
@@ -255,20 +256,26 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 ```
 1. 更新 last_scheduler_tick（健康心跳，最先做，保证监控可见）
 2. 检查预算：今日 token 消耗 >= max_daily_tokens → 记 notification（budget），跳过自动领取（插队请求仍放行）并通知
-3. auto_execute == '0' → 仅处理插队请求（步骤 6a）后退出；跳过自动领取、卡死回收与过期归档
+3. auto_execute == '0' → 跳过自动领取（步骤 6c）；**卡死回收（步骤 4）、过期归档（步骤 5）、插队请求（步骤 6b）仍执行**
+   —— auto_execute 只控制"自动领取"，数据维护操作（回收/归档）与用户显式插队不受影响
 4. 卡死回收：in_progress 且 (now - updated_at) 超过对应阈值
    （常规任务 stale_simple_min=5 / 复杂任务 stale_complex_min=60）
    → 标记 fail 退回 waiting，reason="执行超时回收"（修复现状缺口 4）
    —— updated_at 即心跳：执行过程中任何写库动作都会刷新它
 5. 过期归档：waiting 任务 expire_at 已过 → 转 archived，记 notification（expired）
    （todo 状态不自动处理：任务还在人挑选阶段，是否过期由用户自行判断）
-6. 领取任务（最多 max_per_tick 个）：
-   a. 优先处理 execute_requests 中 pending 的任务（手动插队优先）
-   b. 无 pending → next 领 waiting 队首（最早 updated_at，且未过期）
+6. 领取任务（受 max_concurrent 全局并行上限约束）：
+   a. 并发检查：SELECT COUNT(*) FROM tasks WHERE status='in_progress'
+      若 >= max_concurrent → 本轮不领任何任务，退出（严格串行默认 max_concurrent=1）
+   b. 优先处理 execute_requests 中 pending 的任务（手动插队优先）
+   c. 无 pending → next 领 waiting 队首（最早 updated_at，且未过期）
+   —— 插队请求同样受 max_concurrent 限制："立即执行" = 提高优先级（下轮优先于其他 waiting 领取），
+      而非绕过并发上限（防止用户连续点击导致无限并行烧钱）
 7. 逐任务分发（只分发不等待）：
    - is_complex=1 → spawn hermes agent 子进程（后台，日志重定向 logs/executor-<task_id>.log）
    - 否则 → spawn executor_llm 子进程（后台，日志同上）
-8. 日志落盘 logs/scheduler.log（每 tick 一行：时间/动作/任务 id/结果）
+8. 通知记录清理：删除 created_at 早于 30 天的 notifications（每次 tick 顺手做，量小）
+9. 日志落盘 logs/scheduler.log（每 tick 一行：时间/动作/任务 id/结果）
 ```
 
 防呆设计：
@@ -281,7 +288,9 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 - **并发安全**：`next` 是原子 UPDATE（`WHERE status='waiting'`），多 tick 不会重复领取同一任务。
 - **预算防呆**：每日 token 消耗超限自动暂停自动执行并通知；次日重置。
 
-成本控制：默认每轮领取 1 个任务；执行均为异步子进程，tick 本身秒级。5 分钟一轮，实际吞吐受 API 耗时限制（每任务几十秒到几分钟），个人使用绰绰有余。
+成本控制：默认 max_concurrent=1（严格串行：同时只有 1 个任务 in_progress，领取前检查并发数）；
+执行均为异步子进程，tick 本身秒级。5 分钟一轮，单任务几十秒到几分钟，个人使用绰绰有余。
+若未来需要提吞吐，调大 max_concurrent 即获得并行（成本同步上升，由预算上限兜底）。
 
 ### 5.4 执行器设计
 
@@ -293,21 +302,32 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 
 ```
 1. 幂等检查：output.md 已存在且非空 → 直接 complete，退出
-2. 读任务：idea.md 构思全文 + content_type + 激活目标描述 + 关联热点信息
+2. 读任务：idea.md 构思全文 + content_type + 激活目标描述 + 关联热点信息 + redo_note（打回意见，如有则注入 prompt 作为修改要求）
 3. 按 content_type 选 prompt 模板（见 5.5 产出规格），注入任务信息
 4. 调 DeepSeek API（非流式单次调用，复用 scorer.py 的调用方式与 key 配置）
+   **HTTP 超时 120 秒**（httpx timeout=120s）；超时或网络异常 → 主动 fail 退回（reason 含错误），
+   不依赖回收机制（防止子进程永久挂起泄漏资源）
    记录 usage.token → token_used
 5. 轻量质检（第二次 API 调用，短输出，成本低）：
    检查维度：
    - 字数是否达标（按类型最低字数）
    - AI 味词汇密度（模板化表达、排比泛滥）
-   - 事实性断言是否需要标注来源（如引用具体数字/事件，检查有无依据）
+   - 事实性断言标注：是否包含具体数字/日期/引用且未标注来源（可操作，避免模糊误判）
    质检不通过 → 带质检意见重生成 1 次（同一轮内，非跨轮调度重试）
    → 仍不通过 → fail 退回 waiting，reason 含质检意见
-6. 落盘：若 output.md 已存在（打回重做场景）→ 先改名 output_v<N>.md 保留旧版；
+   **质检输出 schema（JSON）**：
+   ```json
+   {"pass": true|false, "issues": ["问题1", "问题2"], "suggestions": "改进方向"}
+   ```
+   executor 解析 pass 判断是否通过；重试时把 issues + suggestions 拼入重生成 prompt
+   （注入位置：内容要求之前，格式："上一版存在以下问题，请修正：<issues>；<suggestions>"）
+6. 落盘：若 output.md 已存在（打回重做场景）→ 先改名保留旧版（版本号 N =
+   扫描目录中 output_v*.md 的最大编号 + 1，避免手动删除后编号冲突）；
    新产出写入 output.md
 7. complete --summary '<一句话完成摘要>'（LLM 生成或截取产出首段）
-8. 通知：hermes send（QQ）+ notifications 表双写
+8. 预算实时复核：本次执行累计 token_used 计入后若超 max_daily_tokens → 记 notification（budget）
+   （tick 级检查是"领取前拦截"，此处的完成时复核兜底"执行中超支"，可能有少量超支，个人项目可接受）
+9. 通知：hermes send（QQ）+ notifications 表双写
 ```
 
 #### 复杂执行器（Hermes agent 深度执行）
@@ -315,6 +335,8 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 - 新增 prompt 文件 `scripts/deploy/prompts/complex-execute.txt`（复用现有 execute.txt 结构，改为定向 `--task-id` 单任务模式）。
 - 调度器 spawn：`hermes chat -q "$(cat prompts/complex-execute.txt)" --task-id N`，后台子进程，日志重定向 `logs/executor-<task_id>.log`；**tick 不等待子进程结束**。
 - agent 能力：读构思全文 → 多轮迭代、调用工具（联网调研、读取关联热点原文）→ 产出更高质量内容 → **执行后自审**（对照质检维度自查，不满意自行修改）→ `complete` / `fail`。
+- **token 统计**：`complete` 命令新增 `--token-used N` 参数；complex-execute.txt prompt 要求 agent
+  从 hermes 会话输出中读取本次消耗量并传入，供成本统计（估算值即可）。
 - **通知责任方**：复杂任务的通知由 agent 自身在 complete/fail 之后发送（agent 拥有 terminal 工具，可调用 `hermes send` 与通知 API）；调度 tick 只负责 spawn，不负责等待与通知。
 - 与 QQ bot 的 hermes 实例并行不冲突（独立会话）。
 
@@ -361,7 +383,12 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 | paused | 任务名 + 连续失败已达上限，已暂停自动执行，需在 Web 界面处理 |
 | expired | 任务名 + 热点时效已过，已自动归档 |
 | budget | 今日 token 预算已用尽，自动执行已暂停（次日恢复；立即执行仍可用） |
-| scheduler | 调度器长时间未运行（>15 分钟），系统可能异常 |
+| scheduler | 调度器长时间未运行（>15 分钟），系统可能异常（触发方见下） |
+
+**调度器健康监控的触发方（调度器自己挂了必须有人发通知）：**
+- Web 前端：轮询接口时检查 last_scheduler_tick 超 15 分钟 → 界面标红 + 顶部提示（不依赖 QQ）
+- 独立监控 cron：云端 crontab 增加每 15 分钟一次的轻量检查（python 单行：读 last_scheduler_tick，
+  超 15 分钟则 `hermes send` 发 QQ 通知）。与调度器进程完全独立，调度器挂掉也能告警
 
 ### 5.7 生成侧改动
 
@@ -385,6 +412,7 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 | 场景 | 策略 |
 |---|---|
 | API 调用失败/限流 | fail 退回 waiting + reason，下一轮自然重试，达上限暂停 |
+| API 调用超时（>120 秒） | executor 主动 fail 退回（reason 含超时）；子进程正常退出，不泄漏资源 |
 | LLM 输出非法（空/超短/报错文本） | fail 退回，同上 |
 | 质检不通过 | 带反馈重生成 1 次；仍不通过 fail 退回（reason 含质检意见） |
 | hermes 子进程崩溃/超时 | updated_at 心跳超时回收（复杂 60 分钟） |
@@ -394,9 +422,14 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 | cron tick 重叠 | `next` 原子领取防重复；scheduler 文件锁防重入 |
 | 数据库并发 | 沿用 WAL + 短事务 |
 | 任务过期 | 调度时 expire_at 已过 → 自动归档 + expired 通知 |
-| 每日预算超限 | 暂停自动执行 + budget 通知；立即执行仍可用；次日重置 |
-| 调度器本身失效（cron 挂/服务器重启） | last_scheduler_tick 停止更新 → Web 标红 + scheduler 通知 |
+| 每日预算超限 | tick 级"领取前拦截" + executor 完成时复核；暂停自动执行 + budget 通知；立即执行仍可用；次日重置 |
+| 调度器本身失效（cron 挂/服务器重启） | last_scheduler_tick 停止更新 → Web 标红 + 独立监控 cron 发 QQ 通知 |
 | 任务删除与产出文件 | 删除任务不删产出目录（防误删）；Web 提供手动清理入口 |
+
+**成本估算示例（供预算感知）：**
+- 一篇长文（约 3000 字）：生成 ~6000 token + 质检 ~1500 token = ~7500 token；质检不过重试一次约翻倍（~15000 token）
+- 默认 max_daily_tokens=500000：约可产出 30-60 篇长文/日（视重试率），个人使用余量充足
+- 成本可见：Web 顶部实时显示今日消耗
 
 ### 5.10 测试策略（pytest 扩展，现有 78 个不破坏）
 
@@ -409,7 +442,7 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 ### 5.11 明确不做（YAGNI）
 
 - 执行进度百分比/流式展示（in_progress 状态 + 心跳时间 + 日志足够）。
-- 多 worker 并行执行（串行成本可控，以后需要再加）。
+- 默认并行度提升：max_concurrent 已支持并行，默认保持 1（严格串行）控制成本；按需调大即可，无需新架构。
 - 执行结果自动发布到自媒体平台（用户手动发布/编辑，产出落盘 + 通知即可；发布相关数据复盘依赖此能力，一并延后）。
 - 任务执行历史表（日志文件 + 状态字段覆盖需求）。
 - 任务优先级字段（FIFO + 手动插队 + 过期归档覆盖"人挑选"场景，避免语义复杂化）。
@@ -449,6 +482,7 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 ### 6.3 数据与兼容
 
 - [ ] 旧库迁移：tasks 新增字段正确（content_type=long, is_complex=0, fail_count=0, expire_at=NULL, token_used=0）；sources 新增 ttl_hours 默认 24；notifications 表创建成功
+- [ ] 迁移时 expire_at 回填：有关联热点且热点有 ttl_hours 的任务，回填 expire_at = 热点 collected_at + ttl_hours；无关联热点保持 NULL（不失效）
 - [ ] 现有 78 个测试 + 新增测试全部通过
 - [ ] 云端 crontab 更新后无重复执行（旧 03:00 执行条目已移除，新增每 5 分钟 scheduler 条目）
 - [ ] 本地开发环境不启调度（双实例策略：生产单一实例云端，本地仅开发调试）
@@ -515,6 +549,23 @@ cron 每 5 分钟触发，单次运行，严格顺序：
 | 视频脚本类型的后续链路 | 本次仅产出脚本；配音/剪辑/字幕流水线为独立演进方向 |
 | 百度热搜等采集合规性 | 现状可用（公开 API）；若遇反爬或条款变更，来源可配置切换 |
 
+### 8.4 第二轮审阅处理记录（用户设计逻辑审查，v3 修订）
+
+**设计逻辑问题（已修正）：**
+
+| # | 意见 | 修正 |
+|---|---|---|
+| 1 | auto_execute=0 时不应跳过卡死回收与过期归档（数据维护不受执行开关控制） | 5.3 步骤 3：auto_execute 只控制自动领取；回收/归档/插队始终执行 |
+| 2 | max_per_tick=1 + 异步执行实际是并行，与"串行成本可控"矛盾 | 引入 max_concurrent（默认 1 = 严格串行，领取前检查 in_progress 数）；5.11 YAGNI 表述同步修正 |
+| 3 | 调度器异常通知的触发主体不明（自己挂了没法发通知） | 双触发方：Web 前端标红 + 独立监控 cron（每 15 分钟，与调度器进程独立）发 QQ |
+
+**实现细节（已写入文档）**：质检 JSON schema 与重试注入逻辑（5.4）、API 120 秒超时主动 fail（5.4/5.9）、
+复杂任务 --token-used 统计（5.4）、redo_note 字段存打回意见（5.2/5.4）、成本估算示例（5.9）、
+output_v<N> 编号取最大+1（5.4）、迁移时 expire_at 回填（6.3）。
+
+**小优化（已采纳）**：notifications 30 天清理（5.3 步骤 8）、executor 完成时预算复核（5.4 步骤 8）、
+质检"事实断言"维度简化为"具体数字/日期/引用未标注来源"（5.4 步骤 5）。
+
 ---
 
-*本规格 v2 吸收审阅意见后修订。回归验证按第 6 章清单执行。*
+*本规格 v3 吸收两轮审阅意见后修订。回归验证按第 6 章清单执行。*
