@@ -157,6 +157,10 @@ def set_setting(conn, key, value):
 # ---- tags（主题标签，可自定义）----
 
 def create_tag(conn, *, name, description=""):
+    """创建标签；同名已存在时直接返回已有 id（防重）。"""
+    existing = conn.execute("SELECT id FROM tags WHERE name=?", (name,)).fetchone()
+    if existing:
+        return existing["id"]
     cur = conn.execute("INSERT INTO tags (name, description, is_active) VALUES (?,?,1)",
                        (name, description))
     conn.commit()
