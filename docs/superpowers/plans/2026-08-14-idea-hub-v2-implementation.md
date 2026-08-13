@@ -20,6 +20,7 @@
 - 全部端点 Basic Auth 保护（config 读取凭据）+ 应用层限流
 - 所有任务状态变更用条件 UPDATE（WHERE status IN 允许前置状态），rowcount=0 → API 层 409
 - 长任务端点立即返回 `{job_id}`；job 心跳在子步骤边界 + LLM 尝试前更新（单次 LLM 超时 90s、最多重试 2 次）
+- SSE 端点不实现（spec 6.5 标注"可选增强"），前端一律轮询 `GET /jobs/{id}`；SSE 定位为内部/服务端消费接口，留待后续按需添加
 - 版本递增原子性：同一事务内 SELECT MAX → 校验 base_version → INSERT，UNIQUE(task_id, version) 兜底
 - 数据全部重来（D3）：开发期直接删 data/、outputs/，不迁移
 - 代码统一用 codex CLI 编写（`codex exec`），本计划提供接口签名与测试断言，实现细节由 codex 完成
@@ -59,7 +60,7 @@
 
 **settings 初始键（spec 6.6）：** score_todo_threshold=8(int)、collect_interval_hours=24(int)、daily_budget_tokens=50000(int)、score_dimensions=["facts","verification","timeliness","value"](json)、generate_count=10(int)、done_column_limit=50(int)、discard_retention_days=7(int)
 
-- [ ] **Step 1: 写失败测试** — `test_init_schema_creates_all_tables`（查 sqlite_master 含 11 张表 + 3 张 fts 表）、`test_settings_seeded`（settings 表有 7 键且 value_type 正确）、`test_fts_triggers_exist`（sqlite_master 含 hot_items_ai/au/ad、tasks_ai/au/ad、outputs_ai/au/ad 触发器）
+- [ ] **Step 1: 写失败测试** — `test_init_schema_creates_all_tables`（查 sqlite_master 含 11 张表 + 3 张 fts 表）、`test_settings_seeded`（settings 表有 7 键且 value_type 正确）、`test_fts_triggers_exist`（sqlite_master 含 hot_items_ai/au/ad、tasks_ai/au/ad、outputs_ai/au/ad 触发器）、`test_db_backup_creates_consistent_copy`（写库含数据 → db.backup 到临时文件 → 打开备份断言表数据一致、WAL 未 checkpoint 的写入也在备份中）
 - [ ] **Step 2: 运行确认失败** — Expected: FAIL（ImportError）
 - [ ] **Step 3: 实现 db.py** — 关键：outputs 表 `id INTEGER PRIMARY KEY AUTOINCREMENT` + `UNIQUE(task_id, version)`；FTS 触发器实现 spec 5.3 先删后插策略（outputs_fts 的 INSERT/UPDATE 触发器：仅当新行 version=MAX 时，先按旧行 id DELETE 再 INSERT 新行）
 - [ ] **Step 4: 运行确认通过** — `uv run pytest tests/test_db_schema.py -v`
@@ -77,7 +78,7 @@
 
 - [ ] **Step 1: 写失败测试** — `test_health_no_auth_401`、`test_health_with_auth_200`、`test_rate_limit_429`（连发 N+1 次）、`test_unknown_error_500_shape`（注入抛异常路由）
 - [ ] **Step 2: 运行确认失败**
-- [ ] **Step 3: 实现** — `GET /api/v1/health` 返回 `{data:{status:"ok", db:"ok", scheduler_last_tick: null}}`；Auth 用 `fastapi.security.HTTPBasic`；限流用内存字典 + 时间窗
+- [ ] **Step 3: 实现** — `GET /api/v1/health` 返回 `{data:{status:"ok", db:"ok", scheduler:{last_tick: null, status: "never_run"}}}`（spec 5.5：last_tick 缺失 = 从未运行不健康；有值时 status 按超 10 分钟未更新判 unhealthy）；Auth 用 `fastapi.security.HTTPBasic`；限流用内存字典 + 时间窗
 - [ ] **Step 4: 运行确认通过**
 - [ ] **Step 5: Commit** — `git commit -m "feat(api): app factory, basic auth, rate limit, error contract"`
 
@@ -98,6 +99,24 @@
 - [ ] **Step 5: Commit** — `git commit -m "feat(web): vite scaffold, auth-aware api client, layout shell, theme"`
 
 **S1 验收：** `uv run uvicorn idea_hub.main:app --port 8000` 启动，`curl -u user:pass http://127.0.0.1:8000/api/v1/health` 返回 ok；前端 `pnpm dev` 登录页可访问、暗色切换生效。
+
+### Task S1.5: settings API
+
+**Files:**
+- Create: `idea_hub/routers/settings.py`, `idea_hub/services/settings.py`
+- Test: `tests/test_api_settings.py`
+
+**Interfaces:**
+- Produces: `GET /api/v1/settings`（仅返回 7 个用户可配置键，内部键 scheduler_last_tick/scheduler_last_collect 不暴露，spec 6.6）；`PUT /api/v1/settings {key, value}`（按 value_type 校验 int/float/string/json；未知键 400 `{error:{code:"UNKNOWN_SETTING"}}`；校验失败 400 `{error:{code:"INVALID_SETTING_VALUE"}}`）
+- Consumes: settings 表（S1.2 种子数据）
+
+- [ ] **Step 1: 写失败测试** — GET 返回 7 键不含内部键、PUT 更新 int 键生效、PUT 类型错误 400 INVALID_SETTING_VALUE、PUT 未知键 400 UNKNOWN_SETTING、score_dimensions 用 json 类型校验
+- [ ] **Step 2: 运行确认失败**
+- [ ] **Step 3: 实现** — 薄路由 + services（value_type 从表读，按类型转换校验）
+- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 5: Commit** — `git commit -m "feat(api): settings get/put with type validation"`
+
+**（注：前端 done 列、调度器参数均消费此 API，S5 各任务引用。）**
 
 ---
 
@@ -186,6 +205,38 @@
 
 **S2 验收：** 手动 POST /collect 后热点流可见新数据（verdict=admit）；重复触发返回同一 job_id；test 端点验证渠道连通性；zhihu/weibo/v2ex 可建源并抓取。
 
+### Task S2.6: 前端来源管理页（SourcesPage）
+
+**Files:**
+- Create: `web/src/pages/SourcesPage.tsx`, `web/src/components/sources/SourceForm.tsx`, `web/src/components/sources/ChannelPresetSelect.tsx`
+- Test: `web/src/pages/SourcesPage.test.tsx`
+
+**Interfaces:**
+- Consumes: `GET/POST/PATCH/DELETE /sources`、`POST /sources/{id}/toggle`、`POST /sources/{id}/test`
+- Produces: 来源列表（类型/启停开关）、新建/编辑表单（type 下拉用渠道预设：hotlist/rss/github/hackernews/zhihu-hotlist/weibo-hotlist/v2ex + 各预设默认 url/字段映射）、测试抓取按钮（展示 {ok, item_count, sample_items} 或 error）
+
+- [ ] **Step 1: 写失败测试** — 列表渲染启停开关、新建提交 payload、toggle 调用、test 结果展示成功/失败两态
+- [ ] **Step 2: 运行确认失败**
+- [ ] **Step 3: 实现** — React Query mutations + 乐观更新
+- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 5: Commit** — `git commit -m "feat(web): sources management page"`
+
+### Task S2.7: 前端 job 进度组件
+
+**Files:**
+- Create: `web/src/api/hooks/useJobPolling.ts`, `web/src/components/jobs/JobProgressBar.tsx`
+- Test: `web/src/components/jobs/JobProgressBar.test.tsx`
+
+**Interfaces:**
+- Consumes: `GET /jobs/{id}`（React Query refetchInterval 2s，done/failed 停止轮询）；job 触发响应 `{job_id, reused}`
+- Produces: `useJobPolling(jobId, enabled)` hook（返回 {status, progress, error, isDone}）；JobProgressBar 组件（进度条 + 状态文案 + 失败 error 展示 + 重试入口）；触发 collect/generate/execute 后展示进度；reused=true 时提示"已有进行中的任务"且复用已有轮询（维护活跃 job_id 集合防重复轮询，spec 6.8）
+
+- [ ] **Step 1: 写失败测试** — 轮询到 done 停止、reused 复用已有轮询（mock hook 断言只订阅一次）、失败显示 error
+- [ ] **Step 2: 运行确认失败**
+- [ ] **Step 3: 实现**
+- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 5: Commit** — `git commit -m "feat(web): job polling hook and progress bar"`
+
 ---
 
 ## S3 评分（两档分流 + LLM 评分）
@@ -200,7 +251,7 @@
 - Produces: `score_items(items: list[dict], api_key: str | None, dimensions: list[str]) -> list[dict]`（每条附 final_score、score_breakdown、verdict）；无 api_key → 全 verdict=admit 降级；`score_todo_threshold` 由调用方传入；等权均值 `feasibility = round(mean(dims))`
 - Consumes: settings（score_dimensions、score_todo_threshold）、prompts
 
-- [ ] **Step 1: 写失败测试** — `test_no_key_all_admit`、`test_score_breakdown_shape`（mock DeepSeek 返回 JSON 含各维度数字）、`test_verdict_by_threshold`（>=8 admit / <8 discard）、`test_round_mean_equality`（[8,7,9,8] → 8）
+- [ ] **Step 1: 写失败测试** — `test_no_key_all_admit`、`test_score_breakdown_shape`（mock DeepSeek 返回 JSON 含各维度数字）、`test_verdict_by_threshold`（>=8 admit / <8 discard）、`test_round_mean_equality`（[8,7,9,8] → 8）、`test_llm_error_falls_back_admit`（mock 调用抛错 → 全部 verdict=admit 且评分字段为空，收集不中断）
 - [ ] **Step 2: 运行确认失败**
 - [ ] **Step 3: 实现** — 规则过滤层（v1 的标题党/广告/时效衰减，0 token）→ LLM 批量评分（prompts 模板，JSON 输出，超时 90s 重试 2 次）→ 等权聚合分流
 - [ ] **Step 4: 运行确认通过**
@@ -254,7 +305,7 @@
 - Produces: `get_candidates(conn, count: int | None, hotspot_ids: list[int] | None) -> list[dict]`（候选 = verdict=admit 且未关联 task 且未过期（collected_at + ttl_hours > now 或 ttl NULL）；指定 hotspot_ids 则忽略过滤条件直接取；默认按 final_score DESC 取 count（settings.generate_count 默认 10）；无评分热点按 collected_at DESC）
 - Consumes: settings、db
 
-- [ ] **Step 1: 写失败测试** — admit 未关联未过期入选、discard/已关联/过期排除、hotspot_ids 显式指定、count 生效、无评分排序回退
+- [ ] **Step 1: 写失败测试** — admit 未关联未过期入选、discard/已关联/过期排除、hotspot_ids 显式指定（仍须满足 verdict=admit 且未关联 task 且未过期，仅从指定集合中筛选，不扩宽过滤条件）、count 生效、无评分排序回退
 - [ ] **Step 2: 运行确认失败**
 - [ ] **Step 3: 实现**
 - [ ] **Step 4: 运行确认通过**
@@ -267,10 +318,10 @@
 - Test: `tests/test_llm.py`, `tests/test_prompts.py`
 
 **Interfaces:**
-- Produces: `llm.chat_json(messages, api_key, timeout=90, retries=2) -> dict`（JSON 输出解析 + 重试 + 每尝试前可注入心跳回调）；`llm.chat_text(...)`；prompts：`generate_prompt(hotspot, target_desc, content_type, dimensions) -> str`（要求 JSON：title/idea_summary/full_idea/content_type/tags[]/score_breakdown{维度}/ai_summary 留空）；`execute_prompt(task, ...)`（产出 markdown 正文 + ai_summary）
+- Produces: `llm.chat_json(messages, api_key, timeout=90, retries=2) -> dict`（JSON 输出解析 + 重试 + 每尝试前可注入心跳回调）；`llm.chat_text(...)`；prompts：`generate_prompt(hotspot, target_desc, content_type) -> str`（要求 JSON：title/idea_summary/full_idea/content_type/tags[]，**不含评分**——评分继承热点）；`execute_prompt(task, ...)`（产出 markdown 正文 + ai_summary）
 - Consumes: config（deepseek_api_key）
 
-- [ ] **Step 1: 写失败测试** — `test_chat_json_retries_on_timeout`（mock httpx 先超时后成功）、`test_chat_json_parse_strips_code_fence`、`test_generate_prompt_contains_dimensions`、`test_execute_prompt_returns_markdown_contract`
+- [ ] **Step 1: 写失败测试** — `test_chat_json_retries_on_timeout`（mock httpx 先超时后成功）、`test_chat_json_parse_strips_code_fence`、`test_generate_prompt_requires_idea_fields`（title/idea_summary/full_idea/content_type/tags，**不含评分**——评分继承热点，spec 5.4 评分数据链）、`test_execute_prompt_returns_markdown_contract`
 - [ ] **Step 2: 运行确认失败**
 - [ ] **Step 3: 实现** — httpx 同步调用 DeepSeek `/chat/completions`（base https://api.deepseek.com）；JSON 提取兼容 ```json 围栏
 - [ ] **Step 4: 运行确认通过**
@@ -284,12 +335,12 @@
 - Test: `tests/test_generate_job.py`
 
 **Interfaces:**
-- Produces: `POST /api/v1/generate {count?, hotspot_ids?}` → job；generate job 流程：get_candidates → 逐个 chat_json(generate_prompt) → `tasks.create_from_generation(conn, gen: dict, hotspot_id) -> task_id`（继承 score_breakdown、feasibility_score=final_score、expire_at=collected_at+ttl、写入 idea.md 落盘、标签按名 upsert、status=todo 或 discard（score < threshold 不建任务））→ finish(done, `{"task_ids": [...]}`)；token 累加 jobs.token_used
+- Produces: `POST /api/v1/generate {count?, hotspot_ids?}` → job；generate job 流程：get_candidates → 逐个 chat_json(generate_prompt) → `tasks.create_from_generation(conn, gen: dict, hotspot_id) -> task_id`（继承 score_breakdown、feasibility_score=final_score、expire_at=collected_at+ttl、写入 idea.md 落盘、标签按名 upsert、status 始终 todo——候选已筛选，生成阶段不二次分流）→ finish(done, `{"task_ids": [...]}`)；token 累加 jobs.token_used
 - Consumes: llm、prompts、candidates、settings
 
-- [ ] **Step 1: 写失败测试** — `test_generate_creates_tasks`（mock llm 返回 2 个生成结果 → 2 个 todo 任务 + idea.md 落盘 + 关联 task_links）、`test_generate_low_score_discarded`（score 6 < 8 不建任务）、`test_expire_at_inherited`、`test_tags_upserted`、`test_generate_dedup_running`
+- [ ] **Step 1: 写失败测试** — `test_generate_creates_tasks`（mock llm 返回 2 个生成结果 → 2 个 todo 任务 + idea.md 落盘 + 关联 task_links）、`test_expire_at_inherited`、`test_tags_upserted`、`test_generate_dedup_running`
 - [ ] **Step 2: 运行确认失败**
-- [ ] **Step 3: 实现** — 每候选处理完调用心跳回调；idea.md 写 `base_path/outputs/tasks/<id>/idea.md`
+- [ ] **Step 3: 实现** — `create_from_generation` 始终创建 todo 任务（候选已由 S4.1 筛选 verdict=admit，生成阶段不做二次分流）；每候选处理完调用心跳回调；idea.md 写 `base_path/outputs/tasks/<id>/idea.md`
 - [ ] **Step 4: 运行确认通过**
 - [ ] **Step 5: Commit** — `git commit -m "feat(generate): async job creating tasks from hotspots"`
 
@@ -323,10 +374,10 @@
 - Test: `tests/test_api_tasks.py`
 
 **Interfaces:**
-- Produces: `GET /api/v1/tasks?status=&page=&size=&q=&tag=`；`GET /api/v1/tasks/{id}`（含 tags、关联热点摘要、产物摘要 {has_output, latest_version, version_count, ai_summary}，正文不返回）；`POST /api/v1/tasks`（必填 title/content_type，可选 idea_summary/feasibility_score(默认0)/score_breakdown/target_desc/notes/hotspot_id/expire_at，status 默认 todo）；`PATCH`；`DELETE`（级联删 task_links/task_tags/outputs 行+落盘目录，notifications/jobs 保留）；`POST /api/v1/tasks/{id}/move {to_status}`（按 spec 5.2 矩阵条件 UPDATE：done→in_progress 禁止、done→todo 允许、todo→done 允许等；rowcount=0 → 409）
+- Produces: `GET /api/v1/tasks?status=&page=&size=&q=&tag=`；`GET /api/v1/tasks/{id}`（含 tags、关联热点摘要、产物摘要 {has_output, latest_version, version_count, ai_summary}，正文不返回）；`POST /api/v1/tasks`（必填 title/content_type，可选 idea_summary/feasibility_score(默认0)/score_breakdown/target_desc/notes/hotspot_id/expire_at，status 默认 todo）；`PATCH`；`DELETE`（级联删 task_links/task_tags/outputs 行+落盘目录，notifications/jobs 保留）；`POST /api/v1/tasks/{id}/move {to_status}`（按 spec 5.2 矩阵条件 UPDATE：done→in_progress 禁止、done→todo 允许、todo→done 允许等；rowcount=0 → 409）；`POST /api/v1/tasks/{id}/redo {note?}`（仅限 done 或 fail_count > 0；status→waiting、fail_count 清零、redo_note 存时间戳+备注；其他 409）；`POST /api/v1/tasks/{id}/reset-failures`（仅限 fail_count > 0；其余 409）
 - Consumes: tags、db
 
-- [ ] **Step 1: 写失败测试** — 迁移矩阵全组合（todo→waiting OK、done→in_progress 409、in_progress→todo 409、done→todo OK）、创建默认值、详情含产物摘要、级联删除（task 删除后 outputs 行无 + 目录无 + notifications 保留）、q= 走 tasks_fts、tag 过滤
+- [ ] **Step 1: 写失败测试** — 迁移矩阵全组合（todo→waiting OK、done→in_progress 409、in_progress→todo 409、done→todo OK）、创建默认值、详情含产物摘要、级联删除（task 删除后 outputs 行无 + 目录无 + notifications 保留）、q= 走 tasks_fts、tag 过滤、redo（done 或 fail_count>0 成功→waiting 且 fail_count 清零；todo 无失败 409）、reset-failures（fail_count>0 成功清零；fail_count=0 409）
 - [ ] **Step 2: 运行确认失败**
 - [ ] **Step 3: 实现** — move 用 `UPDATE tasks SET status=? WHERE id=? AND status IN (前置集合)`；done 迁移时写 completed_at
 - [ ] **Step 4: 运行确认通过**
@@ -387,10 +438,10 @@
 - Test: `tests/test_scheduler.py`
 
 **Interfaces:**
-- Produces: `scheduler.tick(conn) -> TickResult`：1) 更新 settings.scheduler_last_tick；2) 过期任务处理（todo/waiting 且 expire_at < now → done + completed_at + 备注 + task_expired 通知；in_progress 跳过）；3) discard 清理（verdict=discard 且 collected_date < now-7d → 删行）；4) 崩溃恢复（running 且 heartbeat_at 超 5min → failed + 通知，条件 UPDATE）；5) collect 触发判断（读 collect_interval_hours + scheduler_last_collect，间隔到且无 running collect → 创建 collect job）
+- Produces: `scheduler.tick(conn) -> TickResult`：1) 更新 settings.scheduler_last_tick；2) 过期任务处理（todo/waiting 且 expire_at < now → done + completed_at + 备注 + task_expired 通知；in_progress 跳过）；3) discard 清理（verdict=discard 且 collected_date < now - settings.discard_retention_days → 删行）；4) 崩溃恢复（running 且 heartbeat_at 超 5min → failed + 通知，条件 UPDATE）；5) collect 触发判断（读 collect_interval_hours + scheduler_last_collect，间隔到且无 running collect → 创建 collect job）
 - Consumes: settings、jobs、db
 
-- [ ] **Step 1: 写失败测试** — 过期任务自动完成 + 通知、in_progress 不过期、discard 清理 + FTS 同步清除（spec 10 必测：删后搜索不返回）、stale job 标记 failed（条件 UPDATE 并发安全）、collect 触发/去重/间隔逻辑、内部键初始缺失行为
+- [ ] **Step 1: 写失败测试** — 过期任务自动完成 + 通知、in_progress 不过期、discard 清理读取 settings.discard_retention_days（设 3 验证 3 天前的删、7 天前的保留）+ FTS 同步清除（spec 10 必测：删后搜索不返回）、stale job 标记 failed（条件 UPDATE 并发安全）、collect 触发/去重/间隔逻辑、内部键初始缺失两场景（scheduler_last_collect 缺失 → 首 tick 触发 collect 不报错；scheduler_last_tick 缺失 → /health 返回 never_run）
 - [ ] **Step 2: 运行确认失败**
 - [ ] **Step 3: 实现** — 无状态函数，一次 tick 一个事务
 - [ ] **Step 4: 运行确认通过**
@@ -409,7 +460,7 @@
 - Test: `tests/test_executor_v2.py`
 
 **Interfaces:**
-- Produces: `execute_one(conn, task_id, api_key, heartbeat_cb) -> ExecuteResult{ok, token_used, error?}`：前置检查（todo/waiting 或 done 无产物 → in_progress 条件 UPDATE）；chat_text(execute_prompt) → 产出 markdown；写 outputs 首版（version=1, filename="output.md"）；写 ai_summary；任务 → done + completed_at；token 双写（tasks.token_used += N、job.token_used 由调用方累加）；失败 → in_progress → waiting + fail_count+1 + last_fail_reason；内部状态冲突（rowcount=0）→ 产物仍写 + warn 通知 + 计入 failed_items（spec 6.8）
+- Produces: `execute_one(conn, task_id, api_key, heartbeat_cb) -> ExecuteResult{ok, token_used, conflict: bool = False, error?}`：前置检查（todo/waiting 或 done 无产物 → in_progress 条件 UPDATE）；chat_text(execute_prompt) → 产出 markdown；写 outputs 首版（version=1, filename="output.md"）；写 ai_summary；任务 → done + completed_at；token 双写（tasks.token_used += N、job.token_used 由调用方累加）；失败 → in_progress → waiting + fail_count+1 + last_fail_reason；内部状态冲突（rowcount=0）→ 产物仍写 + warn 通知 + conflict=True 标记（job 层据此计入 failed_items/skipped，spec 6.8）
 - Consumes: llm、prompts、outputs 服务
 
 - [ ] **Step 1: 写失败测试** — 成功链路（产出落盘 + version=1 + done）、LLM 失败回退 waiting + fail_count、幂等（done 有产物跳过）、done 无产物补执行、状态冲突不覆盖（mock 任务被外部改 waiting 后产物仍写）
@@ -425,12 +476,12 @@
 - Test: `tests/test_execute_job.py`
 
 **Interfaces:**
-- Produces: `POST /api/v1/execute {task_ids}`（同步校验全部合法，任一非法 → 409 + invalid_task_ids）；job 流程：预算检查（SUM(jobs.token_used WHERE date(created_at)=today) > daily_budget_tokens → failed + budget_exceeded 通知）→ 逐任务 execute_one → 每任务完成立即累加 job.token_used + 实时预算检查（达限停止，未完成移回 waiting）→ finish（部分失败 done + failed_items / 全失败 failed）；通知：全成功 info execute_done / 部分 warn / 全失败 error job_failed（聚合一条）
+- Produces: `POST /api/v1/execute {task_ids}`（同步校验全部合法，任一非法 → 409 + invalid_task_ids）；job 流程：预算检查（SUM(jobs.token_used WHERE date(created_at)=today) > daily_budget_tokens → failed + budget_exceeded 通知）→ 串行逐任务 execute_one → 每任务完成立即累加 job.token_used + 实时预算检查（达限停止后续，未开始任务保持原状态）→ finish（部分失败 done + failed_items / 全失败 failed）；通知：全成功 info execute_done / 部分 warn / 全失败 error job_failed（聚合一条）
 - Consumes: execute_one、settings
 
-- [ ] **Step 1: 写失败测试** — 批量执行、非法 task_ids 409 列表、预算超限 failed + 通知、执行中达预算停止、部分成功 done + failed_items、通知分级
+- [ ] **Step 1: 写失败测试** — 批量执行、非法 task_ids 409 列表、预算超限 failed + 通知、执行中达预算停止（未开始任务保持原状态不执行，串行语义下不存在需移回 waiting 的 in_progress 任务）、部分成功 done + failed_items（含 conflict 标记任务）、通知分级
 - [ ] **Step 2: 运行确认失败**
-- [ ] **Step 3: 实现**
+- [ ] **Step 3: 实现** — 串行逐任务：每任务开始前条件 UPDATE → in_progress；完成后累加 token 并检查预算，达限停止后续（未开始任务保持 todo/waiting 不动）
 - [ ] **Step 4: 运行确认通过**
 - [ ] **Step 5: Commit** — `git commit -m "feat(jobs): execute job with budget gate and partial success"`
 
@@ -549,11 +600,11 @@
 - Create: `scripts/deploy/crontab.txt`（`*/5 * * * *` scheduler tick + `0 2 * * *` 每日备份）、`scripts/deploy/backup.sh`（SQLite online backup + outputs tar，保留 7 份）、`scripts/deploy/install-server.sh`（重写：uv 装依赖、config.yaml 生成、crontab 安装、systemd 或 nohup 起 uvicorn）
 - Modify: `docs/DEPLOY_CLOUD.md`
 
-- [ ] **Step 1: 写备份脚本** — sqlite3 `.backup` 到临时文件再打包 data/idea.db + outputs/，保留 7 份，含日期
-- [ ] **Step 2: 本机验证** — `bash scripts/deploy/backup.sh` 产出备份 tar 且可解压恢复
-- [ ] **Step 3: 写 install-server.sh 与 crontab** — scheduler 入口 `python -m idea_hub.cli tick`
-- [ ] **Step 4: 更新部署文档** — 含限流、备份恢复（文件缺失由 DB 重建）说明
-- [ ] **Step 5: Commit** — `git commit -m "feat(deploy): cron, backup script, install script, docs"`
+- [ ] **Step 1: 写备份脚本** — backup.sh 调用 `python -m idea_hub.cli backup`（cli 子命令内部用 S1.2 的 db.backup 在线备份 API，保证与后端一致）→ 打包 data/idea.db + outputs/，保留 7 份，含日期
+- [ ] **Step 2: 本机验证** — `bash scripts/deploy/backup.sh` 产出备份 tar 且可解压恢复（含 WAL 未 checkpoint 数据）
+- [ ] **Step 3: 写 install-server.sh 与 crontab** — scheduler 入口 `python -m idea_hub.cli tick`；前端构建：`cd web && pnpm build`，FastAPI 静态服务指向 `web/dist`（main.py 挂 StaticFiles，S8 补）
+- [ ] **Step 4: 更新部署文档** — 含限流、备份恢复（文件缺失由 DB 重建）、前端构建部署说明
+- [ ] **Step 5: Commit** — `git commit -m "feat(deploy): cron, backup via cli, install script, frontend build"`
 
 ### Task S8.2: e2e 全链路测试
 
@@ -587,3 +638,29 @@
 2. **占位符**：无 TBD/TODO；每个任务含测试断言与接口签名。
 3. **类型一致性**：`execute_one`（S6.1）→ job（S6.2）→ e2e（S8.2）；`score_items`（S3.1）→ collect 集成（S3.2）；`upsert_by_names`（S4.4）→ generate（S4.3）；`emit`（S7.1）→ S5.5/S6.2 通知调用——命名一致。
 4. **执行顺序依赖**：S3.2 依赖 S3.1；S4.3 依赖 S4.1/S4.2；S5.5 依赖 S5.1（迁移）与 S3（收集）；S6.2 依赖 S6.1/S6.3；S8.2 依赖全部——计划内顺序已满足。
+
+## 计划审阅修正记录（2026-08-14）
+
+实施计划经外部审阅，19 条意见全部采纳，修正如下：
+
+| # | 意见 | 修正 |
+|---|---|---|
+| 1 | S4.3 generate discard 逻辑与 spec 冲突（候选已筛选） | 删除 discard 分支，create_from_generation 始终建 todo；顺带修正 S4.2 prompt 不含评分（评分继承热点） |
+| 2 | S5.1 缺 redo/reset-failures 端点 | S5.1 补充两端点实现与测试（前置状态按 spec 6.3） |
+| 3 | settings API 完全未实现 | 新增 Task S1.5：GET/PUT /settings（7 键、类型校验、UNKNOWN_SETTING） |
+| 4 | 前端 SourcesPage 缺失 | 新增 Task S2.6：来源管理页（CRUD/启停/test 展示/渠道预设） |
+| 5 | 前端 job 进度组件缺失 | 新增 Task S2.7：useJobPolling hook + JobProgressBar（轮询 2s、reused 复用） |
+| 6 | S1.3 健康检查与 spec 5.5 冲突 | 改为 {status, db, scheduler:{last_tick, status}}（never_run/unhealthy） |
+| 7 | S6.2 预算"移回 waiting"与串行矛盾 | 改为未开始任务保持原状态不执行 |
+| 8 | S4.1 显式 hotspot_ids 语义不清 | 明确仍须满足 admit/未关联/未过期，仅从指定集合筛选 |
+| 9 | S3.1 缺 LLM 失败降级测试 | 补 test_llm_error_falls_back_admit |
+| 10 | S5.5 discard 硬编码 7 天 | 改读 settings.discard_retention_days，测试设不同值验证 |
+| 11 | S1.2 db.backup 缺测试 | 补 test_db_backup_creates_consistent_copy（含 WAL 未 checkpoint 数据） |
+| 12 | S6.1 ExecuteResult 缺冲突标记 | 加 conflict: bool 字段，job 层据此计数 |
+| 13 | S8.1 备份脚本重复实现 | backup.sh 调用 `python -m idea_hub.cli backup`（复用 db.backup） |
+| 14 | S8.1 未含前端构建 | 加 pnpm build + FastAPI 静态服务 web/dist |
+| 15 | SSE 未声明不实现 | Global Constraints 注明 SSE 不实现，前端一律轮询 |
+| 16 | S5.5 内部键缺失测试不具体 | 明确两场景：last_collect 缺失首 tick 触发、last_tick 缺失 never_run |
+| 17 | result_ref errors 结构未明确 | collect job errors 用 [{"source_id":1,"error":"..."}] |
+| 18 | 规则过滤层规则需定义 | 实现时参考 v1 规则列表并写入代码注释 |
+| 19 | 前端凭据存储安全提示 | 文档提示 localStorage 凭据风险（个人系统可接受） |
