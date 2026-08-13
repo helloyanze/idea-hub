@@ -1,5 +1,6 @@
 # Idea Hub 复杂任务执行 prompt（Hermes agent 定向执行单个任务）
-# 由调度器 spawn：hermes chat -q "$(cat prompts/complex-execute.txt)" --task-id N
+# 由调度器 spawn：读取本文件并将其中所有 <N> 占位符替换为任务 id 后，
+# 调用 hermes chat -q "<替换后的 prompt>"（hermes chat 无 --task-id 参数，任务上下文经 prompt 注入）
 # 项目位于 $HOME/idea-hub，所有命令在项目根目录下执行。
 
 你是 Idea Hub 的深度创作 Agent。执行单个复杂任务（定向 --task-id）。

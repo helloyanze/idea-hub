@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from idea_hub import db, models
+from idea_hub import db, models, notify
 
 
 def _acquire_lock(lock_path):
@@ -60,12 +60,14 @@ def _recover_stale(conn):
 def _archive_expired(conn):
     out = []
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
-    rows = conn.execute("SELECT id FROM tasks WHERE status='waiting' "
+    rows = conn.execute("SELECT id, title FROM tasks WHERE status='waiting' "
                         "AND expire_at IS NOT NULL AND expire_at < ?",
                         (now_utc,)).fetchall()
     for r in rows:
         models.move_task(conn, r["id"], "archived")
         out.append(r["id"])
+        notify.send(conn, task_id=r["id"], type="expired", title="Idea Hub 任务已归档",
+                    body=f"《{r['title']}》热点时效已过")
     conn.commit()
     return out
 
@@ -80,10 +82,13 @@ def _claim(conn, task_id=None):
             return None
         return models.get_task(conn, task_id)
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    # 失败暂停：连续失败达 max_fail_count 的任务不再被自动领取（插队分支不检查，用户显式意图）
+    max_fail = int(models.get_setting(conn, "max_fail_count", "3"))
     row = conn.execute("SELECT id FROM tasks WHERE status='waiting' AND "
-                       "(expire_at IS NULL OR expire_at >= ?) "
+                       "(expire_at IS NULL OR expire_at >= ?) AND "
+                       "(fail_count IS NULL OR fail_count < ?) "
                        "ORDER BY updated_at LIMIT 1",
-                       (now_utc,)).fetchone()
+                       (now_utc, max_fail)).fetchone()
     if not row:
         return None
     if not models.try_start_task(conn, row["id"]):
@@ -106,7 +111,10 @@ def _dispatch(db_path, base_path, task):
                   f"warn: prompts/complex-execute.txt missing, skip spawn for task {task['id']}")
             return
         prompt = prompt_path.read_text(encoding="utf-8")
-        cmd = ["hermes", "chat", "-q", prompt, "--task-id", str(task["id"])]
+        # 模板占位符 <N> 全部替换为任务 id（hermes chat 无 --task-id 参数，
+        # 任务上下文只能通过 prompt 文本注入）
+        prompt_text = prompt.replace("<N>", str(task["id"]))
+        cmd = ["hermes", "chat", "-q", prompt_text]
     else:
         cmd = [sys.executable, "-m", "idea_hub.executor", "--db", db_path,
                "--task-id", str(task["id"]), "--base", base_path]
@@ -128,6 +136,13 @@ def tick(db_path, base_path):
         max_tokens = int(models.get_setting(conn, "max_daily_tokens", "500000"))
         if models.daily_token_used(conn) >= max_tokens:
             result["skipped_budget"] = True
+            # 预算通知幂等：同日只记 1 条（settings last_budget_notified 存日期，跨日重置）
+            today = datetime.now().strftime("%Y-%m-%d")
+            if models.get_setting(conn, "last_budget_notified", "") != today:
+                notify.send(conn, task_id=None, type="budget",
+                            title="Idea Hub 预算已用尽",
+                            body="今日 token 预算已用尽，自动执行已暂停（次日恢复；立即执行仍可用）")
+                models.set_setting(conn, "last_budget_notified", today)
         # 3. auto_execute 门控（只影响步骤 6c 自动领取）
         auto_execute = models.get_setting(conn, "auto_execute", "1") == "1"
         # 4. 卡死回收（不受 auto_execute 影响）

@@ -126,6 +126,84 @@ def test_budget_skip_manual_claim_still_works(tmp_path):
     assert tid in r2["claimed"]
     assert models.get_task(conn, tid)["status"] == "in_progress"
 
+def test_fail_paused_skipped_in_queue(tmp_path):
+    """失败暂停：fail_count 达 max_fail_count 的任务不再被队首自动领取。"""
+    conn = _db(tmp_path)
+    tid = _waiting(tmp_path, conn)[0]
+    models.update_task(conn, tid, fail_count=3)
+    models.set_setting(conn, "max_fail_count", "3")
+    conn.commit()
+    with patch("idea_hub.scheduler._acquire_lock", return_value=object()):
+        r = scheduler.tick(str(tmp_path / "t.db"), str(tmp_path))
+    assert r["claimed"] == []
+    assert models.get_task(conn, tid)["status"] == "waiting"  # 未被领取
+
+
+def test_fail_paused_manual_claim_still_works(tmp_path):
+    """失败暂停只拦自动领取：用户显式插队（execute_requests）仍放行。"""
+    conn = _db(tmp_path)
+    tid = _waiting(tmp_path, conn)[0]
+    models.update_task(conn, tid, fail_count=3)
+    models.set_setting(conn, "max_fail_count", "3")
+    conn.execute("INSERT INTO execute_requests (task_id) VALUES (?)", (tid,))
+    conn.commit()
+    with patch("idea_hub.scheduler._acquire_lock", return_value=object()), \
+         patch("subprocess.Popen"):
+        r = scheduler.tick(str(tmp_path / "t.db"), str(tmp_path))
+    assert tid in r["claimed"]
+    assert models.get_task(conn, tid)["status"] == "in_progress"
+
+
+def test_budget_notification_once_per_day(tmp_path):
+    """预算通知幂等：同日多次超限 tick 只记 1 条 budget 通知。"""
+    conn = _db(tmp_path)
+    _waiting(tmp_path, conn)
+    models.set_setting(conn, "max_daily_tokens", "10")
+    tid2 = _mk(conn, title="big")
+    models.update_task(conn, tid2, token_used=100)
+    conn.commit()
+    with patch("idea_hub.scheduler._acquire_lock", return_value=object()):
+        scheduler.tick(str(tmp_path / "t.db"), str(tmp_path))
+        scheduler.tick(str(tmp_path / "t.db"), str(tmp_path))
+    rows = conn.execute("SELECT * FROM notifications WHERE type='budget'").fetchall()
+    assert len(rows) == 1
+    assert "预算已用尽" in rows[0]["title"]
+
+
+def test_expired_archived_notification(tmp_path):
+    """过期归档：每个归档任务发 type=expired 通知（含标题与时效说明）。"""
+    conn = _db(tmp_path)
+    tid = _waiting(tmp_path, conn)[0]
+    conn.execute("UPDATE tasks SET expire_at='2000-01-01T00:00:00' WHERE id=?", (tid,))
+    conn.commit()
+    with patch("idea_hub.scheduler._acquire_lock", return_value=object()):
+        r = scheduler.tick(str(tmp_path / "t.db"), str(tmp_path))
+    assert tid in r["expired"]
+    rows = conn.execute("SELECT * FROM notifications WHERE type='expired' AND task_id=?",
+                        (tid,)).fetchall()
+    assert len(rows) == 1
+    assert "热点时效已过" in rows[0]["body"]
+
+
+def test_complex_dispatch_no_taskid_flag(tmp_path):
+    """复杂任务 spawn：<N> 占位符替换为任务 id，命令不含 --task-id。"""
+    conn = _db(tmp_path)
+    tid = _waiting(tmp_path, conn)[0]
+    models.update_task(conn, tid, is_complex=1)
+    conn.commit()
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir()
+    tpl = "执行任务 <N>：运行 next --task-id <N> 确认领取后 complete"
+    (prompts_dir / "complex-execute.txt").write_text(tpl, encoding="utf-8")
+    with patch("subprocess.Popen") as pop, \
+         patch("idea_hub.scheduler._acquire_lock", return_value=object()):
+        r = scheduler.tick(str(tmp_path / "t.db"), str(tmp_path))
+    assert r["claimed"] == [tid]
+    cmd = pop.call_args.args[0]
+    assert cmd[0] == "hermes" and cmd[1] == "chat" and cmd[2] == "-q"
+    assert "--task-id" not in cmd
+    assert cmd[3] == tpl.replace("<N>", str(tid))  # 全部 <N> 替换为任务 id
+
 def test_manual_claim_blocked_by_concurrency(tmp_path):
     """插队同样受并发上限约束：已有 in_progress 占满时不领取。"""
     conn = _db(tmp_path)

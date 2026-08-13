@@ -153,6 +153,63 @@ def test_qa_parse_failure_fails_task(tmp_path):
     assert task["fail_count"] == 1
     assert "质检" in task["last_fail_reason"]
 
+def test_done_sends_notification(tmp_path):
+    """通知闭环：_complete_task 成功后必须发 type=done 通知（含任务标题与摘要）。"""
+    conn, tid = _setup(tmp_path)
+    payload = json.dumps({"title": "新标题", "content": "正文内容" * 100,
+                          "word_count": 300}, ensure_ascii=False)
+    qa_ok = json.dumps({"pass": True, "issues": [], "suggestions": ""})
+    seq = [(payload, 1000), (qa_ok, 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq.pop(0)), \
+         patch("idea_hub.notify.send") as ns:
+        rc = executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path))
+    assert rc == 0
+    done = [c for c in ns.call_args_list if c.kwargs.get("type") == "done"]
+    assert len(done) == 1
+    assert done[0].kwargs["task_id"] == tid
+    assert "测试任务" in done[0].kwargs["body"]      # 标题取自任务标题
+    assert "摘要" in done[0].kwargs["body"] and "新标题" in done[0].kwargs["body"]
+
+
+def test_fail_sends_notification(tmp_path):
+    """通知闭环：_fail_task 后必须发 type=failed 通知（含原因与退回说明）。"""
+    conn, tid = _setup(tmp_path)
+    payload = json.dumps({"title": "t", "content": "差内容" * 100, "word_count": 300})
+    qa_bad = json.dumps({"pass": False,
+                         "issues": [{"type": "structure", "quote": "开头",
+                                     "problem": "无钩子", "fix": "加钩子"}],
+                         "suggestions": "重写"})
+    seq = [(payload, 1000), (qa_bad, 300), (payload, 1000), (qa_bad, 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq.pop(0)), \
+         patch("idea_hub.notify.send") as ns:
+        rc = executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path))
+    assert rc == 1
+    failed = [c for c in ns.call_args_list if c.kwargs.get("type") == "failed"]
+    assert len(failed) == 1
+    assert failed[0].kwargs["task_id"] == tid
+    assert "质检" in failed[0].kwargs["body"] and "等待队列" in failed[0].kwargs["body"]
+
+
+def test_fail_reaching_max_count_sends_paused(tmp_path):
+    """失败暂停：fail_count 达 max_fail_count 阈值时额外发 type=paused 通知。"""
+    conn, tid = _setup(tmp_path)
+    models.set_setting(conn, "max_fail_count", "1")
+    payload = json.dumps({"title": "t", "content": "差内容" * 100, "word_count": 300})
+    qa_bad = json.dumps({"pass": False,
+                         "issues": [{"type": "structure", "quote": "开头",
+                                     "problem": "无钩子", "fix": "加钩子"}],
+                         "suggestions": "重写"})
+    seq = [(payload, 1000), (qa_bad, 300), (payload, 1000), (qa_bad, 300)]
+    with patch.object(executor, "call_llm", side_effect=lambda p, **k: seq.pop(0)), \
+         patch("idea_hub.notify.send") as ns:
+        rc = executor.execute_task(str(tmp_path / "t.db"), tid, str(tmp_path))
+    assert rc == 1
+    types = [c.kwargs.get("type") for c in ns.call_args_list]
+    assert "failed" in types and "paused" in types
+    paused = next(c for c in ns.call_args_list if c.kwargs.get("type") == "paused")
+    assert "暂停" in paused.kwargs["body"]
+
+
 def test_fail_then_complete_accumulates_token_used(tmp_path):
     """失败(打回 waiting)后再次执行成功的场景：token_used 应两轮累加而非被覆盖。"""
     conn, tid = _setup(tmp_path)

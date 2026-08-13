@@ -1,6 +1,6 @@
 # idea_hub/cli.py
 import argparse, json, pathlib, sys
-from idea_hub import db, collectors, models, executor
+from idea_hub import db, collectors, models, executor, notify
 
 def _conn(args):
     c = db.connect(args.db)
@@ -258,6 +258,13 @@ def cmd_resolve_execution(args):
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=?", (args.task_id,))
     conn.commit()
 
+def cmd_notify(args):
+    """写通知（供复杂任务 agent 上报 done/failed/paused 等；qq_target 从 settings 读取）。"""
+    conn = _conn(args)
+    nid = notify.send(conn, task_id=args.task_id, type=args.type,
+                      title=args.title, body=args.body)
+    print(nid)
+
 def _add_parser(sub, name, help_):
     return sub.add_parser(name, help=help_)
 
@@ -316,6 +323,14 @@ def main():
     prx = sub.add_parser("resolve-execution", add_help=False)
     prx.add_argument("--task-id", type=int, required=True)
     prx.set_defaults(func=cmd_resolve_execution)
+    pn = sub.add_parser("notify", help="写通知（复杂任务 agent 用；qq_target 从 settings 读取）")
+    pn.add_argument("--task-id", type=int, default=None,
+                    help="关联任务 id（budget/scheduler 类通知可为空）")
+    pn.add_argument("--type", required=True,
+                    choices=["done", "failed", "paused", "expired", "budget", "scheduler"])
+    pn.add_argument("--title", required=True)
+    pn.add_argument("--body", required=True)
+    pn.set_defaults(func=cmd_notify)
     args = p.parse_args()
     args.func(args)
 

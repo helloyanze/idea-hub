@@ -36,6 +36,9 @@ def test_full_chain(tmp_path):
     assert task["status"] == "done"
     assert (Path(tmp_path) / "outputs" / "tasks" / str(tid) / "output.md").exists()
     assert task["token_used"] >= 700
-    # 通知记录（调度完成后由执行器/agent 发，此处验证表可查）
+    # 通知闭环：执行器 _complete_task 已自动发 done 通知（接线修复），
+    # 此处再手动补一条验证表可查，并断言 done 类型记录存在
     models.create_notification(conn, task_id=tid, type="done", title="完成", body="摘要")
-    assert len(models.list_notifications(conn)) == 1
+    notes = models.list_notifications(conn)
+    assert any(n["type"] == "done" and n["task_id"] == tid for n in notes)
+    assert len(notes) == 2

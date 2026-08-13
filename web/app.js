@@ -168,8 +168,10 @@ function cardEl(t) {
   const back = '<svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>';
   const archive = '<svg viewBox="0 0 24 24"><path d="M3 8h18v12H3z"/><path d="M3 8l2-4h14l2 4"/><path d="M10 12h4"/></svg>';
   const del = '<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>';
+  const play = '<svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg>';
   let q = "";
   if (t.status === "todo") q += `<button class="qbtn confirm" title="确认并加入等待">${check}</button>`;
+  if (t.status === "waiting") q += `<button class="qbtn run" title="立即执行">${play}</button>`;
   if (t.status === "waiting") q += `<button class="qbtn back" title="撤回至待办">${back}</button>`;
   if (t.status === "in_progress") q += `<button class="qbtn confirm" title="标记完成">${check}</button>`;
   if (t.status === "done") {
@@ -195,6 +197,7 @@ function cardEl(t) {
   });
   const bind = (sel, fn) => { const b = c.querySelector(sel); if (b) b.addEventListener("click", e => { e.stopPropagation(); fn(); }); };
   bind(".confirm", () => t.status === "todo" ? confirmTask(t.id) : t.status === "in_progress" ? completeTask(t.id) : archiveDoneTask(t.id));
+  bind(".run", () => runNow(t.id));
   bind(".back", () => t.status === "waiting" ? backTask(t.id) : redoTask(t.id));
   bind(".del", () => delTask(t.id));
   const pick = c.querySelector("[data-pick]");
@@ -264,6 +267,11 @@ async function delTask(id) {
   renderBoard();
   toast("已删除", "err");
   if (curId === id) closeDrawer();
+}
+async function runNow(id) {  // waiting → 插队执行（execute_requests 入队，下一轮调度优先处理）
+  await api.post(`/api/tasks/${id}/execute`);
+  toast("已加入执行队列，下一轮调度优先处理", "ok");
+  await loadAll();
 }
 
 /* =================== 抽屉 =================== */

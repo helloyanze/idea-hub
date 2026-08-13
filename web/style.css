@@ -182,6 +182,7 @@ button{font-family:inherit; cursor:pointer; border:none; background:none; color:
 .qbtn{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;background:var(--card);border:1px solid var(--border);box-shadow:var(--shadow-sm)}
 .qbtn:hover{background:var(--bg-soft)}
 .qbtn.confirm:hover{color:var(--green);border-color:var(--green)}
+.qbtn.run:hover{color:var(--yellow);border-color:var(--yellow)}
 .qbtn.back:hover{color:var(--blue);border-color:var(--blue)}
 .qbtn.restore:hover{color:var(--green);border-color:var(--green)}
 .qbtn.del:hover{color:var(--red);border-color:var(--red)}

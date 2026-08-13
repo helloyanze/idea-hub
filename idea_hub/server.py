@@ -309,7 +309,9 @@ def create_app(db_path: str) -> FastAPI:
         conn = db.connect(DB_PATH)
         try:
             items = models.list_notifications(conn, unread_only=bool(unread_only))
-            unread = len(models.list_notifications(conn, unread_only=True))
+            # unread 用 COUNT 而非 len(list_notifications())：后者受 LIMIT 50 截断会少算
+            unread = conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE is_read=0").fetchone()[0]
             return {"items": items, "unread": unread}
         finally:
             conn.close()

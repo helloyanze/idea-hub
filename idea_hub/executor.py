@@ -6,7 +6,7 @@ import sys
 
 import httpx
 
-from idea_hub import db, models, prompts
+from idea_hub import db, models, notify, prompts
 from idea_hub.scorer import LLM_URL, LLM_MODEL, llm_key
 
 LLM_TIMEOUT = 120
@@ -74,18 +74,29 @@ def _complete_task(conn, task_id, summary, output_path, token_used):
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
                  (task_id,))
     conn.commit()
+    notify.send(conn, task_id=task_id, type="done", title="Idea Hub 任务完成",
+                body=f"《{task['title']}》\n摘要：{summary}")
 
 
 def _fail_task(conn, task_id, reason, token_used):
     task = models.get_task(conn, task_id)
+    new_fail_count = (task["fail_count"] or 0) + 1
     models.update_task(conn, task_id,
-                       fail_count=(task["fail_count"] or 0) + 1,
+                       fail_count=new_fail_count,
                        last_fail_reason=reason,
                        token_used=(task["token_used"] or 0) + token_used)
     models.move_task(conn, task_id, "waiting")
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
                  (task_id,))
     conn.commit()
+    notify.send(conn, task_id=task_id, type="failed", title="Idea Hub 任务失败",
+                body=f"《{task['title']}》\n原因：{reason}\n已退回等待队列")
+    # 连续失败达上限 → 暂停自动执行（调度器队首过滤 fail_count 配合生效）
+    max_fail = int(models.get_setting(conn, "max_fail_count", "3"))
+    if new_fail_count >= max_fail:
+        notify.send(conn, task_id=task_id, type="paused",
+                    title="Idea Hub 任务已暂停",
+                    body=f"《{task['title']}》连续失败已达上限（{max_fail} 次），已暂停自动执行")
 
 
 def _summary_from(payload: dict, content: str) -> str:

@@ -52,6 +52,27 @@ def test_fail_increments_count_and_reason(tmp_path):
     assert task["status"] == "waiting" and task["fail_count"] == 1
     assert task["last_fail_reason"] == "测试失败"
 
+def test_notify_subcommand_writes_notification(tmp_path):
+    """cli notify：写 notifications 表（供复杂任务 agent 上报完成/失败/暂停）。"""
+    tid = _mk_task(tmp_path)
+    r = _run_cli(tmp_path, "notify", "--task-id", str(tid), "--type", "done",
+                 "--title", "Idea Hub 任务完成", "--body", "《t》\n摘要：完成")
+    assert r.returncode == 0, r.stderr
+    conn = db.connect(str(tmp_path / "t.db"))
+    rows = conn.execute("SELECT * FROM notifications").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["type"] == "done" and rows[0]["task_id"] == tid
+    assert rows[0]["title"] == "Idea Hub 任务完成"
+    conn.close()
+
+
+def test_notify_subcommand_rejects_invalid_type(tmp_path):
+    """cli notify：--type 只允许 done/failed/paused/expired/budget/scheduler。"""
+    _mk_task(tmp_path)
+    r = _run_cli(tmp_path, "notify", "--task-id", "1", "--type", "bogus",
+                 "--title", "T", "--body", "B")
+    assert r.returncode != 0
+
 def test_execute_auto_cli(tmp_path):
     tid = _mk_task(tmp_path)
     _run_cli(tmp_path, "next", "--task-id", str(tid))
