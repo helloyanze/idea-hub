@@ -16,6 +16,7 @@ import {
   subscribeCredentials,
 } from "@/lib/auth";
 import { ThemeProvider } from "@/lib/theme";
+import { SourcesPage } from "@/pages/SourcesPage";
 import { UnderConstruction } from "@/pages/UnderConstruction";
 
 const queryClient = new QueryClient();
@@ -87,7 +88,7 @@ function Shell() {
             />
             <Route
               path="/sources"
-              element={<UnderConstruction description="来源页面将在后续任务中实现" />}
+              element={<SourcesPage />}
             />
             <Route
               path="/notifications"
