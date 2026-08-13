@@ -172,7 +172,10 @@ def test_hn_parse(monkeypatch):
 # ---------- registry ----------
 
 def test_collector_registry_maps_all_source_types():
-    assert set(collector_registry) == {"hotlist", "rss", "github-trending", "hackernews"}
+    assert set(collector_registry) == {
+        "hotlist", "rss", "github-trending", "hackernews",
+        "zhihu-hotlist", "weibo-hotlist", "v2ex",
+    }
     for cls in collector_registry.values():
         assert issubclass(cls, BaseCollector)
 

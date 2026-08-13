@@ -1,6 +1,10 @@
 from dataclasses import dataclass
 
 
+class CollectorError(Exception):
+    pass
+
+
 @dataclass
 class RawItem:
     title: str

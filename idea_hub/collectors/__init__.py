@@ -3,6 +3,9 @@ from idea_hub.collectors.github import GithubTrendingCollector
 from idea_hub.collectors.hackernews import HackerNewsCollector
 from idea_hub.collectors.hotlist import HotlistCollector
 from idea_hub.collectors.rss import RssCollector
+from idea_hub.collectors.v2ex import V2exCollector
+from idea_hub.collectors.weibo import WeiboCollector
+from idea_hub.collectors.zhihu import ZhihuCollector
 from idea_hub import models
 
 
@@ -11,6 +14,9 @@ collector_registry: dict[str, type[BaseCollector]] = {
     RssCollector.type: RssCollector,
     GithubTrendingCollector.type: GithubTrendingCollector,
     HackerNewsCollector.type: HackerNewsCollector,
+    ZhihuCollector.type: ZhihuCollector,
+    WeiboCollector.type: WeiboCollector,
+    V2exCollector.type: V2exCollector,
 }
 
 

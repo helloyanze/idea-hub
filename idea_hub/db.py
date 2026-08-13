@@ -6,7 +6,7 @@ import sqlite3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK (type IN ('hotlist','rss','github-trending','hackernews')),
+    type TEXT NOT NULL CHECK (type IN ('hotlist','rss','github-trending','hackernews','zhihu-hotlist','weibo-hotlist','v2ex')),
     name TEXT NOT NULL,
     url TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
