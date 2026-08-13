@@ -59,9 +59,10 @@ def _recover_stale(conn):
 
 def _archive_expired(conn):
     out = []
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     rows = conn.execute("SELECT id FROM tasks WHERE status='waiting' "
                         "AND expire_at IS NOT NULL AND expire_at < ?",
-                        (datetime.now().isoformat(timespec="seconds"),)).fetchall()
+                        (now_utc,)).fetchall()
     for r in rows:
         models.move_task(conn, r["id"], "archived")
         out.append(r["id"])
@@ -78,10 +79,11 @@ def _claim(conn, task_id=None):
         if not models.try_start_task(conn, task_id):
             return None
         return models.get_task(conn, task_id)
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
     row = conn.execute("SELECT id FROM tasks WHERE status='waiting' AND "
                        "(expire_at IS NULL OR expire_at >= ?) "
                        "ORDER BY updated_at LIMIT 1",
-                       (datetime.now().isoformat(timespec="seconds"),)).fetchone()
+                       (now_utc,)).fetchone()
     if not row:
         return None
     if not models.try_start_task(conn, row["id"]):
@@ -93,16 +95,24 @@ def _dispatch(db_path, base_path, task):
     """分发：复杂任务 spawn hermes agent；常规任务 spawn executor 子进程。"""
     log_dir = pathlib.Path(base_path) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    logf = open(log_dir / f"executor-{task['id']}.log", "ab")
     if task.get("is_complex"):
         # 直接读取 prompt 文件内容作为单参数传入（Popen 非 shell 模式，
         # "$(cat ...)" 字符串不会被展开，需在 Python 侧读文件）
-        prompt = (pathlib.Path(base_path) / "prompts" / "complex-execute.txt").read_text(encoding="utf-8")
+        prompt_path = pathlib.Path(base_path) / "prompts" / "complex-execute.txt"
+        if not prompt_path.exists():
+            # 复杂 prompt 文件由 Task 10 创建，当前缺失时跳过分发，
+            # 任务保持 in_progress 由超时回收兜底
+            print(f"{datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')} "
+                  f"warn: prompts/complex-execute.txt missing, skip spawn for task {task['id']}")
+            return
+        prompt = prompt_path.read_text(encoding="utf-8")
         cmd = ["hermes", "chat", "-q", prompt, "--task-id", str(task["id"])]
     else:
         cmd = [sys.executable, "-m", "idea_hub.executor", "--db", db_path,
                "--task-id", str(task["id"]), "--base", base_path]
+    logf = open(log_dir / f"executor-{task['id']}.log", "ab")
     subprocess.Popen(cmd, stdout=logf, stderr=logf, cwd=base_path)
+    logf.close()
 
 
 def tick(db_path, base_path):
@@ -124,27 +134,26 @@ def tick(db_path, base_path):
         result["recovered"] = _recover_stale(conn)
         # 5. 过期归档（不受 auto_execute 影响）
         result["expired"] = _archive_expired(conn)
-        if not result["skipped_budget"]:
-            # 6. 领取
-            max_concurrent = int(models.get_setting(conn, "max_concurrent", "1"))
-            in_progress = conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status='in_progress'").fetchone()[0]
-            if in_progress < max_concurrent:
-                # 6b 插队优先
-                pending = conn.execute(
-                    "SELECT task_id FROM execute_requests WHERE status='pending' "
-                    "ORDER BY id").fetchall()
-                claimed = None
-                for p in pending:
-                    claimed = _claim(conn, p["task_id"])
-                    if claimed:
-                        break
-                # 6c 自动领取（auto_execute 开时）
-                if claimed is None and auto_execute:
-                    claimed = _claim(conn)
+        # 6. 领取（并发上限内；插队不受预算门控，自动领取受预算+auto_execute 双重门控）
+        max_concurrent = int(models.get_setting(conn, "max_concurrent", "1"))
+        in_progress = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status='in_progress'").fetchone()[0]
+        if in_progress < max_concurrent:
+            # 6b 插队优先：用户明确要跑的必须能跑，预算超限也放行
+            pending = conn.execute(
+                "SELECT task_id FROM execute_requests WHERE status='pending' "
+                "ORDER BY id").fetchall()
+            claimed = None
+            for p in pending:
+                claimed = _claim(conn, p["task_id"])
                 if claimed:
-                    result["claimed"].append(claimed["id"])
-                    _dispatch(db_path, base_path, claimed)
+                    break
+            # 6c 自动领取（auto_execute 开且预算未超限时）
+            if claimed is None and auto_execute and not result["skipped_budget"]:
+                claimed = _claim(conn)
+            if claimed:
+                result["claimed"].append(claimed["id"])
+                _dispatch(db_path, base_path, claimed)
         # 8. 通知清理（30 天）
         models.clear_old_notifications(conn, 30)
         conn.commit()
