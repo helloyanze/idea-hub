@@ -42,7 +42,7 @@ uv venv .venv
 uv pip install -r requirements.txt
 
 # 2. 启动 Web 看板（首次运行自动初始化数据库：建表 + 默认标签）
-uv run uvicorn idea_hub.server:app --host 127.0.0.1 --port 8000
+uv run uvicorn idea_hub.main:app --host 127.0.0.1 --port 8000
 
 # 3. 浏览器打开 http://127.0.0.1:8000
 #    在界面中创建目标模式（如"自媒体内容"）并添加来源（见下方示例）

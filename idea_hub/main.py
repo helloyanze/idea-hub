@@ -12,7 +12,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starlette.middleware.cors import CORSMiddleware
 
 from . import db
-from .config import Config
+from .config import Config, load
 from .errors import AppError, INTERNAL, RATE_LIMITED
 from .routers.settings import router as settings_router
 from .routers.sources import router as sources_router
@@ -143,3 +143,7 @@ def create_app(config: Config) -> FastAPI:
         allow_credentials=True,
     )
     return app
+
+
+# Uvicorn entry point using default config for local development (auth off).
+app = create_app(load())
