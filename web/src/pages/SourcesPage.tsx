@@ -2,6 +2,8 @@ import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { ApiError, apiFetch } from "@/api/client"
+import { useCollectTrigger } from "@/api/hooks/useJobPolling"
+import { JobProgressBar } from "@/components/jobs/JobProgressBar"
 import {
   SourceForm,
   type SourceFormInitialValues,
@@ -47,6 +49,7 @@ function SourcesPage() {
   )
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<number, TestResult>>({})
+  const { trigger, job, reusedNotice } = useCollectTrigger()
 
   const sourcesQuery = useQuery({
     queryKey: sourceQueryKey,
@@ -130,8 +133,19 @@ function SourcesPage() {
     <div className="mx-auto w-full max-w-5xl space-y-6 p-6">
       <div className="flex items-center justify-between gap-4">
         <h2 className="text-xl font-semibold">来源</h2>
-        <Button onClick={() => setEditingSource(null)}>新建来源</Button>
+        <div className="flex items-center gap-2">
+          <Button aria-label="触发收集" onClick={trigger}>触发收集</Button>
+          <Button onClick={() => setEditingSource(null)}>新建来源</Button>
+        </div>
       </div>
+
+      {job ? (
+        <JobProgressBar
+          jobId={job.jobId}
+          notice={reusedNotice}
+          onRetry={trigger}
+        />
+      ) : null}
 
       {editingSource !== undefined ? (
         <Card>
