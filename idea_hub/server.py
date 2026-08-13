@@ -43,6 +43,9 @@ class PatchIn(BaseModel):
     feasibility_score: int | None = None
     score_breakdown: str | None = None
     notes: str | None = None
+    content_type: str | None = None
+    is_complex: int | None = None
+    redo_note: str | None = None
 
 class TargetIn(BaseModel):
     name: str
@@ -301,6 +304,56 @@ def create_app(db_path: str) -> FastAPI:
             models.set_setting(c, body.key, body.value)
             return {"ok": True}
 
+    @app.get("/api/notifications")
+    def api_notifications(unread_only: int = 0):
+        conn = db.connect(DB_PATH)
+        try:
+            items = models.list_notifications(conn, unread_only=bool(unread_only))
+            unread = len(models.list_notifications(conn, unread_only=True))
+            return {"items": items, "unread": unread}
+        finally:
+            conn.close()
+
+    @app.post("/api/notifications/{nid}/read")
+    def api_notification_read(nid: int):
+        conn = db.connect(DB_PATH)
+        try:
+            models.mark_notification_read(conn, nid)
+            return {"ok": True}
+        finally:
+            conn.close()
+
+    @app.post("/api/notifications/read-all")
+    def api_notifications_read_all():
+        conn = db.connect(DB_PATH)
+        try:
+            models.mark_all_notifications_read(conn)
+            return {"ok": True}
+        finally:
+            conn.close()
+
+    @app.get("/api/health")
+    def api_health():
+        conn = db.connect(DB_PATH)
+        try:
+            health = models.get_health(conn)
+            health["today_tokens"] = models.daily_token_used(conn)
+            return health
+        finally:
+            conn.close()
+
+    @app.post("/api/tasks/{task_id}/reset-failures")
+    def api_reset_failures(task_id: int):
+        conn = db.connect(DB_PATH)
+        try:
+            task = models.get_task(conn, task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail="task not found")
+            models.update_task(conn, task_id, fail_count=0, last_fail_reason=None)
+            return {"ok": True}
+        finally:
+            conn.close()
+
     repo_root = pathlib.Path(__file__).parent.parent
     web_dir = repo_root / "web"
     if web_dir.exists():
@@ -315,7 +368,9 @@ def create_app(db_path: str) -> FastAPI:
     return app
 
 # 模块级 app 供 `uvicorn idea_hub.server:app` 导入（Task 8 cron 也依赖此入口）
-app = create_app("data/idea.db")
+# 模块级 DB_PATH：新端点按模块全局引用，测试可 monkeypatch 指向临时库
+DB_PATH = "data/idea.db"
+app = create_app(DB_PATH)
 
 def main():
     import uvicorn
