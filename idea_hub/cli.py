@@ -1,6 +1,6 @@
 # idea_hub/cli.py
 import argparse, json, pathlib, sys
-from idea_hub import db, collectors, models
+from idea_hub import db, collectors, models, executor
 
 def _conn(args):
     c = db.connect(args.db)
@@ -201,6 +201,11 @@ def cmd_next(args):
     task = models.get_task(conn, row["id"])
     print(json.dumps(task, ensure_ascii=False))
 
+def cmd_execute_auto(args):
+    """调常规执行器（子进程模式）。退出码 0=done 1=failed 2=幂等完成。"""
+    rc = executor.execute_task(args.db, args.task_id, args.base)
+    sys.exit(rc)
+
 def cmd_complete(args):
     conn = _conn(args)
     task = models.get_task(conn, args.task_id)
@@ -213,7 +218,9 @@ def cmd_complete(args):
     p = d / "output.md"
     p.write_text(content, encoding="utf-8")
     rel = str(pathlib.Path("outputs") / "tasks" / str(args.task_id) / "output.md").replace("\\", "/")
-    models.update_task(conn, args.task_id, ai_summary=args.summary, output_path=rel)
+    token_used = (task.get("token_used") or 0) + getattr(args, "token_used", 0)
+    models.update_task(conn, args.task_id, ai_summary=args.summary, output_path=rel,
+                       token_used=token_used, fail_count=0, last_fail_reason=None)
     models.move_task(conn, args.task_id, "done")
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
                  (args.task_id,))
@@ -226,7 +233,10 @@ def cmd_fail(args):
     if task is None:
         print(f"error: task {args.task_id} not found", file=sys.stderr)
         sys.exit(1)
-    models.update_task(conn, args.task_id, notes=f"{task['notes']}\n[失败] {args.reason}".strip())
+    fail_count = (task.get("fail_count") or 0) + 1
+    models.update_task(conn, args.task_id,
+                       notes=f"{task['notes']}\n[失败] {args.reason}".strip(),
+                       fail_count=fail_count, last_fail_reason=args.reason)
     models.move_task(conn, args.task_id, "waiting")
     conn.execute("UPDATE execute_requests SET status='done' WHERE task_id=? AND status='pending'",
                  (args.task_id,))
@@ -285,11 +295,16 @@ def main():
     pc.add_argument("--task-id", type=int, required=True)
     pc.add_argument("--summary", required=True)
     pc.add_argument("--output-path", required=True)
+    pc.add_argument("--token-used", type=int, default=0,
+                    help="本次执行消耗 token（成本统计，默认 0）")
     pc.set_defaults(func=cmd_complete)
     pf = sub.add_parser("fail")
     pf.add_argument("--task-id", type=int, required=True)
     pf.add_argument("--reason", required=True)
     pf.set_defaults(func=cmd_fail)
+    pe = sub.add_parser("execute-auto")
+    pe.add_argument("--task-id", type=int, required=True)
+    pe.set_defaults(func=cmd_execute_auto)
     sub.add_parser("pending-executions").set_defaults(func=cmd_pending_executions)
     prx = sub.add_parser("resolve-execution", add_help=False)
     prx.add_argument("--task-id", type=int, required=True)
