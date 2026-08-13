@@ -7,6 +7,7 @@ job's failure path (finish failed + job_failed notification).
 """
 import pytest
 
+from idea_hub import db
 from idea_hub.errors import AppError
 from idea_hub.services import jobs
 
@@ -77,6 +78,41 @@ def test_dedup_running(conn):
     assert jobs.dedup_running(conn, "collect") is None  # finished no longer dedups
 
 
+def test_dedup_running_skips_stale(conn):
+    job_id = jobs.create_job(conn, "collect", {})
+    jobs.mark_running(job_id)
+
+    conn.execute(
+        "UPDATE jobs SET heartbeat_at = datetime('now', '-6 minutes') WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+    assert jobs.dedup_running(conn, "collect") is None
+
+    conn.execute(
+        "UPDATE jobs SET heartbeat_at = NULL, "
+        "created_at = datetime('now', '-10 minutes') WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+    assert jobs.dedup_running(conn, "collect") is None
+
+    conn.execute(
+        "UPDATE jobs SET heartbeat_at = NULL, created_at = datetime('now') "
+        "WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+    assert jobs.dedup_running(conn, "collect") == job_id
+
+    conn.execute(
+        "UPDATE jobs SET heartbeat_at = datetime('now') WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+    assert jobs.dedup_running(conn, "collect") == job_id
+
+
 def test_create_job_invalid_type_raises(conn):
     with pytest.raises(AppError):
         jobs.create_job(conn, "nope", {})
@@ -100,3 +136,25 @@ def test_run_collect_job_failure_marks_failed(conn, tmp_path, monkeypatch):
     ).fetchone()
     assert notif is not None
     assert notif["level"] == "error"
+
+
+def test_run_collect_job_connect_failure_does_not_double_raise(
+    conn, tmp_path, monkeypatch
+):
+    job_id = jobs.create_job(conn, "collect", {})
+    jobs.mark_running(job_id)
+    real = db.connect
+    calls = 0
+
+    def flaky(path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("disk full")
+        return real(path)
+
+    monkeypatch.setattr("idea_hub.db.connect", flaky)
+    jobs.run_collect_job(job_id, {}, str(tmp_path / "test.db"))
+
+    assert _get(conn, job_id)["status"] == "failed"
+    assert _get(conn, job_id)["error"] == "disk full"

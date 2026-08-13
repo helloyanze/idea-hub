@@ -109,8 +109,14 @@ def finish(job_id, status, result_ref=None, error=None, token_used=None) -> int:
 
 
 def dedup_running(conn, type) -> int | None:
+    # Formal stale-job reclamation is handled by the S5.5 scheduler.
     row = conn.execute(
-        "SELECT id FROM jobs WHERE type=? AND status='running' ORDER BY id LIMIT 1",
+        "SELECT id FROM jobs WHERE type=? AND status='running' AND ("
+        "(heartbeat_at IS NOT NULL "
+        "AND heartbeat_at >= datetime('now', '-5 minutes')) OR "
+        "(heartbeat_at IS NULL "
+        "AND created_at >= datetime('now', '-5 minutes'))"
+        ") ORDER BY id LIMIT 1",
         (type,),
     ).fetchone()
     return row[0] if row is not None else None
@@ -176,15 +182,16 @@ def run_collect_job(job_id, payload, db_path) -> None:
             )
     except Exception as exc:
         finish(job_id, "failed", error=str(exc))
-        emit(
-            conn,
-            "job_failed",
-            "收集任务失败",
-            str(exc),
-            "error",
-            entity_type="job",
-            entity_id=job_id,
-        )
+        if conn is not None:
+            emit(
+                conn,
+                "job_failed",
+                "收集任务失败",
+                str(exc),
+                "error",
+                entity_type="job",
+                entity_id=job_id,
+            )
     finally:
         if conn is not None:
             conn.close()
