@@ -13,3 +13,4 @@ backups/
 !web/vendor/*.json
 sub*.yaml
 config*.yaml
+.superpowers/
