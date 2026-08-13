@@ -127,7 +127,7 @@ web/
 
 | 表 | 字段要点 | 说明 |
 |---|---|---|
-| `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口（见 5.4） |
+| `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口，默认 24，允许 NULL（NULL = 热点永不过期）（见 5.4） |
 | `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, score_breakdown, verdict, collected_date | verdict: admit/discard；score_breakdown 为评分阶段写入的维度明细（JSON，与 tasks 格式一致）；content_snapshot 截断至 2000 字符；collected_date = DATE(collected_at) 冗余列，专供 discard 清理查询避免函数索引，建 (verdict, collected_date) 联合索引；UNIQUE(source_id, url) 防重复 |
 | `tasks` | id, title, idea_summary, ai_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4；content_type 枚举、score_breakdown 格式、idea_summary/ai_summary 语义见 5.4；落盘路径均为固定模式由 task_id 推导（idea: outputs/tasks/<id>/idea.md，output: outputs/tasks/<id>/output.md），不存字段 |
 | `task_links` | task_id, hot_item_id | 多对多关联 |
@@ -168,6 +168,7 @@ web/
 | done | 允许（拖拽回炉，不动 fail_count） | 禁止 | 允许（仅限无产物补执行，条件 UPDATE 限定） | - |
 
 - 状态变更仅通过 move 操作；进入 done 时记录 completed_at
+- **两套迁移规则区分**：上表为"内部状态变更"全集（move / execute / redo / 过期 / 执行失败共用）；其中 `done → in_progress` 仅由 execute 端点内部条件 UPDATE 完成（限定 status='done' AND 无 outputs 行），**move 端点一律禁止该迁移**（前端看板拖拽不允许 done → in_progress 列，需先拖回 todo 或触发补执行）
 - 执行失败：执行器将任务 in_progress → waiting（fail_count + 1，last_fail_reason 记录），不引入 failed 状态
 - 补执行：done 且无产物的任务允许直接触发 execute（done → in_progress，条件 UPDATE 限定 status='done' AND 无 outputs 行），视为补产出
 - 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 todo/waiting → done，备注"已过期"并写通知；in_progress 跳过并发警告（避免与执行器写回冲突）
@@ -200,6 +201,7 @@ web/
 - `notifications.level` 枚举：info / warn / error；前端角标颜色：info 蓝 / warn 黄 / error 红
 - 产物首版创建：执行器执行完成写产物时创建 version=1；编辑器打开无产物时 GET /output 返回 {content: null, version: 0}，PUT 时 base_version=0 表示创建首版
 - `outputs.filename` 用途：执行器首版 = "output.md"；上传替换时保存原始文件名（展示与导出用）；导出历史版本下载文件名 = filename
+- `outputs.filename` 在 PUT 编辑时：继承当前最新版本的 filename（保持不变），保证历史版本导出文件名稳定；仅上传替换更新为原始名
 - 版本递增原子性：PUT/upload 在同一事务内 SELECT MAX(version) → 校验 base_version == MAX → INSERT (MAX+1)，依赖 UNIQUE(task_id, version) 约束兜底，冲突返回 409
 - `sources.keywords`：关键词白名单（逗号分隔），标题包含任一关键词才收录；空 = 不过滤；仅匹配标题，不匹配正文
 - `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零
@@ -217,6 +219,7 @@ web/
 - result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
 - 调度器持久化（settings 内部键，不通过 PUT 修改）：scheduler_last_tick（每次 tick 更新，/health 判断存活：超过 10 分钟未更新判不健康）；scheduler_last_collect（上次 collect 触发时间，与 collect_interval_hours 配合决定是否触发 collect）
 - 收集频率执行机制：cron 按基础频率（每 5 分钟）唤醒 scheduler tick；tick 读取 collect_interval_hours，距 scheduler_last_collect 超过间隔则触发 collect job 并更新该键——动态参数真正生效
+- 调度器触发与去重：tick 触发 collect 走同一 job 去重（同类型 running 存在则跳过本次触发，不更新 scheduler_last_collect，下一 tick 重试）；scheduler_last_collect 在成功创建新 job 后立即更新
 
 ## 6. API 设计（/api/v1）
 
@@ -252,7 +255,7 @@ GET    /api/v1/tasks/{id}                    # 详情（含 tags、关联热点�
 POST   /api/v1/tasks                         # 手动建任务：必填 title、content_type；可选 idea_summary、feasibility_score（默认 0）、score_breakdown、target_desc、notes、hotspot_id（关联热点）、expire_at（不设 = NULL 不过期）；status 默认 todo
 PATCH  /api/v1/tasks/{id}                    # 编辑（标题/摘要/评分/备注）
 DELETE /api/v1/tasks/{id}                    # 级联：删 task_links、task_tags、outputs 行与落盘文件（outputs/tasks/<id>/ 目录）；notifications 与 jobs 历史保留（跳转 404 时提示"任务已删除"）
-POST   /api/v1/tasks/{id}/move      {to_status}
+POST   /api/v1/tasks/{id}/move      {to_status}   # 遵守 5.2 迁移矩阵；done → in_progress 禁止（补执行仅走 execute）
 GET    /api/v1/tags                          # 标签列表（含颜色）
 PUT    /api/v1/tasks/{id}/tags      {names: []}  # 替换语义：按名称 upsert（不存在自动创建，颜色从调色板轮转分配），设置任务全部标签
 POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）；允许前置状态：todo / waiting / done（仅限无产物补执行）；in_progress 409
@@ -292,7 +295,7 @@ GET  /api/v1/notifications?unread_only=&entity_type=&entity_id=&type=
 POST /api/v1/notifications/{id}/read
 POST /api/v1/notifications/read-all
 GET  /api/v1/health                          # 调度器心跳 + 数据库健康
-GET /api/v1/settings                     # 全部动态参数（评分阈值、收集频率、每日预算上限等）
+GET /api/v1/settings                     # 仅返回用户可配置键（7 个预定义键）；内部键（scheduler_last_tick/scheduler_last_collect）不对外暴露，由 /health 与调度器内部使用
 PUT /api/v1/settings  {key: value}       # 更新单键（按 value_type 校验 int/float/string/json）
 ```
 
@@ -303,7 +306,7 @@ settings 初始键（S1 schema 初始化时写入，PUT 仅允许更新预定义
 | key | value_type | 默认值 | 说明 |
 |---|---|---|---|
 | score_todo_threshold | int | 8 | 生成分流：>= 阈值入 todo，否则 discard |
-| collect_interval_hours | int | 24 | 收集频率（cron 间隔参考） |
+| collect_interval_hours | int | 24 | 动态收集间隔：scheduler tick 读取并决定是否触发 collect |
 | daily_budget_tokens | int | 50000 | 每日执行预算上限 |
 | score_dimensions | json | ["facts","verification","timeliness","value"] | 评分维度 |
 | generate_count | int | 10 | generate 默认候选数 |
@@ -316,7 +319,9 @@ settings 初始键（S1 schema 初始化时写入，PUT 仅允许更新预定义
 GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 ```
 
-实现：三张 FTS 表分别 MATCH 后 UNION；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。排序：先按 entity_type 分组展示（组内按 bm25 rank 排序）——不同表的 bm25 分数不可直接跨表比较，不做跨表统一排序。output 类型结果的 entity_id = task_id（前端跳转任务详情；outputs_fts 的 task_id UNINDEXED 列提供该值，不用 outputs.id）。
+实现：三张 FTS 表分别 MATCH 后 UNION；每条结果结构：{entity_type, entity_id, title, snippet, score}（snippet = 命中位置前后截取片段，title = 该实体标题，score = 组内 bm25 排序用）。output 类型结果的 entity_id = task_id（前端跳转任务详情；outputs_fts 的 task_id UNINDEXED 列提供该值，不用 outputs.id）。支持过滤器扩展（entity_type=、source_id=、status=）。
+
+分页策略：三表分别 MATCH 各取前 size 条 → 应用层按 entity_type 分组（组内 bm25 排序）→ 合并列表后按 page/size 统一分页返回（每页可含多组结果）；前端展示时按 entity_type 分组渲染。
 
 与单表搜索的关系：/hotspots?q=、/tasks?q= 为单表 FTS 检索（页面内过滤），/search 为三表 UNION 全局检索；共用同一匹配实现，仅作用域不同。
 
@@ -332,7 +337,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - DELETE source 并发安全：检查关联 → 删除在事务内完成（BEGIN IMMEDIATE check-then-delete）；collect job 仅处理 enabled=1 的来源（删除前需先 toggle 禁用，天然避免写入竞态）
 - job 部分成功语义：批量 job 部分失败 → 状态 done + result_ref 含 failed_items 明细（[{"task_id": 5, "error": "..."}]）；全部失败 → failed；error 字段存整体错误或首个错误
 - 部分成功通知规则：全部成功 → info（execute_done/generate_done）；部分失败 → warn（同类型事件 + failed_items 数量摘要）；全部失败 → error（job_failed）。每批 job 写一条聚合通知
-- 每日预算闭环：execute job 启动时检查（今日消耗 = SUM(jobs.token_used WHERE date(created_at)=today)（含 execute）+ 预估执行成本 > daily_budget_tokens → job 直接 failed + budget_exceeded 通知，不执行）；执行中达到预算则停止后续任务，已完成保留
+- 每日预算闭环（不预估，实时检查）：execute job 启动时检查今日消耗（SUM(jobs.token_used WHERE date(created_at)=today)，含 execute）> daily_budget_tokens → job 直接 failed + budget_exceeded 通知，不执行；执行中每完成一个任务实时检查累计消耗，达到预算则停止后续任务（已完成保留，未完成移回 waiting）
 - SQLite 外键：db.py 连接时 PRAGMA foreign_keys=ON；级联删除不依赖 ON DELETE CASCADE（需同步 FTS 触发器），由 services 层显式事务删除
 
 ## 7. 前端设计
@@ -644,3 +649,19 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 13 | GET /tasks/{id} 产物返回内容未定义 | 采纳 | 详情含产物摘要（has_output/latest_version/version_count/ai_summary），正文单独 GET（6.3 已改） |
 | 14 | 部分成功通知规则未定义 | 采纳 | 全成功 info / 部分失败 warn / 全失败 error，每批一条聚合通知（6.8 已改） |
 | 15 | settings 未知键拒绝的演进提示 | 采纳（记录） | 新增动态参数需同步 schema 初始化；实施时保持初始化集中管理（S1 实现） |
+
+### 第八轮审阅回应（2026-08-14）
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | move 端点与 done→in_progress 例外未协调 | 采纳 | 明确两套迁移规则：矩阵为内部变更全集，done→in_progress 仅 execute 内部条件 UPDATE 完成，move 端点一律禁止（前端拖拽不允许）（5.2/6.3 已改） |
+| 2 | 预估执行成本未定义 | 采纳 | 简化方案：不预估——job 启动检查历史消耗（超限直接 failed），执行中每完成一个实时检查，达预算停止后续（未完成移回 waiting）（6.8 已改） |
+| 3 | 统一搜索返回结构与分页未定义 | 采纳 | 结果结构 {entity_type, entity_id, title, snippet, score}；分页 = 三表各取 size → 分组排序 → 合并统一分页（6.7 已改） |
+| 4 | settings 内部键是否暴露未明确 | 采纳 | GET /settings 仅返回用户可配置键，内部键不对外（6.6 已改） |
+| 5 | sources.ttl_hours 可空性未定义 | 采纳 | 默认 24，允许 NULL（NULL = 永不过期）（5.1 已改） |
+| 6 | 调度器 collect 去重与 last_collect 时机未明确 | 采纳 | tick 触发走同一 job 去重（running 存在则跳过且不更新 last_collect）；成功创建 job 后立即更新（5.5 已改） |
+| 7 | PUT 编辑时 filename 未定义 | 采纳 | PUT 继承当前最新版 filename 保持不变，仅上传替换更新（5.4 已改） |
+| 8 | 分页策略强调 | 并入 #3 | 见上 |
+| 9 | collect_interval_hours 描述过时 | 采纳 | 更新为"动态收集间隔，scheduler tick 读取"（6.6 已改） |
+| 10 | 部分成功通知聚合提示 | 采纳（记录） | 实现时注意聚合逻辑（每批一条） |
+| 11 | hot_items_fts 不含 score_breakdown 无需处理 | 确认 | 无改动（评分变化不影响 FTS） |
