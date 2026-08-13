@@ -50,7 +50,7 @@ function useJobPolling(jobId: number | null, enabled = true) {
     return () => unregisterJobPoll(jobId)
   }, [jobId])
 
-  useQuery({
+  const query = useQuery({
     queryKey: ["job", jobId],
     queryFn: async () => {
       const data = await apiFetch<JobData>(`/api/v1/jobs/${jobId}`)
@@ -59,6 +59,9 @@ function useJobPolling(jobId: number | null, enabled = true) {
     },
     enabled: enabled && jobId !== null,
     refetchInterval: (query) => {
+      if (query.state.error) {
+        return false
+      }
       const status = query.state.data?.status
       if (status === "done" || status === "failed") {
         return false
@@ -69,11 +72,13 @@ function useJobPolling(jobId: number | null, enabled = true) {
   })
 
   const status = jobData?.status
+  const requestError =
+    query.error instanceof Error ? query.error.message : null
 
   return {
     status,
     progress: jobData?.progress,
-    error: jobData?.error ?? null,
+    error: requestError ?? jobData?.error ?? null,
     resultRef: jobData?.result_ref ?? null,
     isDone: status === "done",
     isFailed: status === "failed",

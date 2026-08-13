@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   resetJobPollRegistry,
+  useJobPolling,
   useCollectTrigger,
 } from "@/api/hooks/useJobPolling";
 import { clearCredentials } from "@/lib/auth";
@@ -194,5 +195,48 @@ describe("JobProgressBar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /重试/ }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops polling and surfaces the error when the job request itself fails", async () => {
+    let jobFetches = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).endsWith("/api/v1/jobs/7")) {
+        jobFetches += 1;
+        return Promise.resolve(
+          jsonResponse(
+            { error: { code: "INTERNAL", message: "backend unreachable" } },
+            500,
+          ),
+        );
+      }
+      return Promise.resolve(jsonResponse({ data: {} }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Probe component renders the hook return value into the DOM so the test
+    // can assert the surfaced error without depending on renderHook internals
+    // (result.current is set in a passive effect that fake timers + react-query
+    // never flush in this environment).
+    function ErrorProbe() {
+      const state = useJobPolling(7);
+      return <p data-testid="poll-error">{state.error ?? "no-error"}</p>;
+    }
+
+    renderWithQuery(<ErrorProbe />);
+    await flush();
+
+    // Request error surfaced through the hook return value (not dropped).
+    expect(screen.getByTestId("poll-error")).toHaveTextContent(
+      "backend unreachable",
+    );
+    expect(jobFetches).toBe(1);
+
+    // Polling must stop on request error: no further fetches even after
+    // several 2s intervals.
+    await flush(6000);
+    expect(jobFetches).toBe(1);
+    expect(screen.getByTestId("poll-error")).toHaveTextContent(
+      "backend unreachable",
+    );
   });
 });
