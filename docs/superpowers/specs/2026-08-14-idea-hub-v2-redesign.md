@@ -40,10 +40,10 @@ Idea Hub v1（2026-08-11 ~ 08-13 快速迭代，70+ 提交）功能覆盖收集�
 | D10 | execute_requests 表砍掉，并入 tasks 执行字段 | 减少表间关联 |
 | D11 | 开发方式：垂直切片，8 个切片逐个交付，每片全链路可运行 | 每步有可验收成果 |
 | D12 | 产物双写：markdown 落盘 outputs/tasks/<id>/output.md + outputs 表存元数据与内容缓存；读时以文件为准校验 mtime/hash，不一致自动回写 DB + FTS | 支持 Web 编辑、版本记录、全文索引，同时保持文件可被外部工具使用 |
-| D13 | 保留：SQLite WAL + 每日备份、cron 调度、Basic Auth、Cloudflare Tunnel | 已验证可用，不重写 |
+| D13 | 保留：SQLite WAL + 每日备份（含 data/idea.db 与 outputs/ 目录打包）、cron 调度、Basic Auth、Cloudflare Tunnel | 已验证可用，不重写；备份覆盖产物文件，恢复时若文件缺失由 DB 重建 |
 | D14 | 生成编排本地化：ideahub 直接调用 DeepSeek LLM 生成 idea（复用执行器的 LLM 调用层 + 生成 prompt 模板），不依赖 Hermes 在线；Hermes 仅作 QQ 交互层（查询/推送/操作） | 消除 ideahub ↔ Hermes 循环耦合；cron 全自动运行不依赖 Hermes 可用性；LLM 调用层已被 executor 验证 |
 | D15 | 长任务异步化：pipeline 端点（collect/generate/execute）立即返回 job_id，jobs 表追踪进度，前端轮询（可选 SSE） | 避免请求挂起超时，用户可见进度 |
-| D16 | 产物版本：outputs 表每版本一行，(task_id, version) 联合主键；PUT/上传写入新版本行并更新落盘文件（文件仅保留最新版，历史版本存 DB 可导出）；外部文件回写不递增版本 | 支持真实版本历史回溯，避免自动保存产生垃圾版本 |
+| D16 | 产物版本：outputs 表 id 自增主键 + (task_id, version) UNIQUE，每版本一行；PUT/上传写入新版本行并更新落盘文件（文件仅保留最新版，历史版本存 DB 可导出）；外部文件回写不递增版本 | 支持真实版本历史回溯，避免自动保存产生垃圾版本；id 主键兼容 FTS5 content_rowid |
 
 ## 4. 整体架构
 
@@ -140,26 +140,37 @@ web/
 | 表 | 字段要点 | 说明 |
 |---|---|---|
 | `notifications` | id, type, title, body, level, entity_type, entity_id, is_read, created_at | entity_type/entity_id 关联任务/热点，前端可跳转，Hermes 推送可定位 |
-| `outputs` | task_id, version, filename, content, file_mtime, file_hash, created_at, updated_at | (task_id, version) 联合主键，每版本一行；file_mtime/file_hash 供读时校验（见 5.3） |
+| `outputs` | id INTEGER PK AUTOINCREMENT, task_id, version, filename, content, file_mtime, file_hash, created_at, updated_at | id 为自增主键（FTS5 content_rowid 映射必需）；(task_id, version) UNIQUE 约束，每版本一行；file_mtime/file_hash 供读时校验（见 5.3） |
 | `jobs` | id, type, status, progress, result_ref, error, heartbeat_at, token_used, created_at, updated_at | status: pending/running/done/failed；result_ref 为 JSON 字符串；heartbeat_at 供崩溃恢复（见 5.5）；token_used 统计生成/评分阶段 LLM 消耗（见 5.4） |
 | `schema_version` | version | 迁移版本号（未来 schema 演进用，本次不迁移数据） |
 
-**FTS5 虚拟表（3 张，external content + 触发器）：**
+**FTS5 虚拟表（3 张，external content + 触发器）：** 全部使用 tokenize='trigram'（SQLite 3.34+，中文按 3-gram 可检索；unicode61 对中文分词无效）
 
 | 表 | 索引内容 | 同步方式 |
 |---|---|---|
 | `hot_items_fts` | hot_items(title, content_snapshot) | hot_items 表 INSERT/UPDATE/DELETE 触发器 |
 | `tasks_fts` | tasks(title, idea_summary, ai_summary) | tasks 表触发器 |
-| `outputs_fts` | outputs(content) | outputs 表触发器（PUT/上传/外部文件回写均经 outputs 表，索引自动刷新） |
+| `outputs_fts` | outputs(content)，content_rowid=outputs.id，附 task_id UNINDEXED 列 | outputs 表触发器（PUT/上传/外部文件回写均经 outputs 表，索引自动刷新）；以单一整数 id 映射 content_rowid（FTS5 external content 要求，复合主键不可用） |
 
 统一搜索：三张 FTS 表分别 MATCH 后 UNION（rank 排序）。FTS5 不支持跨表自动关联，故拆三表 + 触发器，写入路径统一，无同步遗漏。
 
 ### 5.2 状态机
 
 - 四状态：`todo`（待办）/ `waiting`（等待）/ `in_progress`（进行中）/ `done`（已完成）
-- 状态变更仅通过 move 操作；进入 done 时记录 completed_at
 - 无 archived 状态：完成任务停留在 done；低分（< 阈值）直接 discard，不创建任务
-- 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 move 到 done，备注"已过期"并写通知；仅作用于 todo / waiting，in_progress 任务跳过并发警告（避免与执行器写回冲突）
+- 合法状态迁移矩阵（move 端点与内部状态变更共用）：
+
+| 从 \\ 到 | todo | waiting | in_progress | done |
+|---|---|---|---|---|
+| todo | - | 允许 | 允许 | 允许（人工） |
+| waiting | 允许 | - | 允许 | 允许（人工/过期） |
+| in_progress | 禁止 | 允许（执行失败回退） | - | 允许（完成） |
+| done | 允许（拖拽回炉，不动 fail_count） | 禁止 | 禁止 | - |
+
+- 状态变更仅通过 move 操作；进入 done 时记录 completed_at
+- 执行失败：执行器将任务 in_progress → waiting（fail_count + 1，last_fail_reason 记录），不引入 failed 状态
+- 过期任务（expire_at < now，见 5.4）：调度器 tick 自动 todo/waiting → done，备注"已过期"并写通知；in_progress 跳过并发警告（避免与执行器写回冲突）
+- redo 与 reset-failures 遵循 6.3 前置条件（done 或 fail_count > 0），与上表不冲突（专用端点，不走 move）
 
 ### 5.3 产出双写与一致性
 
@@ -168,7 +179,7 @@ web/
 - Web 编辑（PUT）/ 上传：写新版本行（version = max+1）+ 更新落盘文件 + FTS 经触发器刷新
 - 外部文件变更检测：读取产物时以文件为准，对比 file_mtime/file_hash，不一致则回写 DB 与 FTS，**不递增版本**（更新当前版本行内容，防编辑器自动保存产生垃圾版本）；不做常驻 watchdog（个人系统，读时校验足够）
 - FTS 索引范围：outputs_fts 仅索引每个 task 的最新版本（触发器判断 version = MAX），FTS 中每个 task 至多一行，避免版本行膨胀与分组复杂度
-- outputs_fts 触发器实现策略（SQLite external content 限制）：AFTER INSERT/UPDATE 时先按 task_id 删除该 task 旧 FTS 行（external content 表的 DELETE 需携带旧内容，实现时用先删后插两段式），再 INSERT 最新版本行；AFTER DELETE 触发器同步删除对应 FTS 行
+- outputs_fts 触发器实现策略（SQLite external content 限制）：AFTER INSERT/UPDATE 时若新行是最新版本（version = MAX），先 DELETE 该 task 旧 FTS 行（按旧行 id 定位：SELECT id FROM outputs WHERE task_id=NEW.task_id AND id<>NEW.id ORDER BY version DESC LIMIT 1，DELETE FROM outputs_fts WHERE rowid=旧id），再 INSERT 新行（rowid=NEW.id）；AFTER DELETE 触发器按 rowid=OLD.id 删除对应 FTS 行
 
 ### 5.4 字段语义
 
@@ -177,12 +188,15 @@ web/
 - `hot_items.content_snapshot`：截断至 2000 字符，防长文膨胀 FTS 索引
 - `hot_items` 清理策略：discard 热点保留 7 天，调度器每日清理（删行 + FTS 触发器同步）
 - `tasks.content_type` 枚举：article（文章，默认）/ video_script（视频脚本）/ tweet（短文）/ newsletter（简报）；生成时由 LLM 根据热点类型与 target_desc 判定，手动建任务可指定
-- `tasks.score_breakdown`：JSON 字符串，多维评分明细，如 {"facts": 8, "verification": 7, "timeliness": 9, "value": 8}（维度随目标可配）；feasibility_score = 各维度加权均值（四舍五入）
+- `tasks.score_breakdown`：JSON 字符串，多维评分明细，如 {"facts": 8, "verification": 7, "timeliness": 9, "value": 8}；维度来源 = settings.score_dimensions（JSON 数组，默认 ["facts","verification","timeliness","value"]，可运行时调整）；feasibility_score = 各维度加权均值（四舍五入）。维度不随 target_desc 变化（target_desc 仅文本描述，不承载配置）
 - `tasks.idea_summary`：生成阶段 LLM 产出的一句话摘要（构思主题）；`tasks.ai_summary`：执行完成后 AI 对成文的总结（文章要点）；两者均入 FTS 索引
 - idea 文件管理：构思全文落盘 outputs/tasks/<id>/idea.md（固定模式），由 generate 服务（S4）随任务创建时写入；不版本化、不做外部变更检测（只读中间产物）
 - `notifications.type` 枚举：collect_done / generate_done / execute_done / job_failed / task_expired / budget_exceeded / discard_cleaned（可扩展）
 - `notifications.level` 枚举：info / warn / error；前端角标颜色：info 蓝 / warn 黄 / error 红
-- `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零；生成/评分阶段 token 计入 jobs.token_used；stats 汇总 = SUM(tasks.token_used) + SUM(jobs.token_used)
+- 产物首版创建：执行器执行完成写产物时创建 version=1；编辑器打开无产物时 GET /output 返回 {content: null, version: 0}，PUT 时 base_version=0 表示创建首版
+- 版本递增原子性：PUT/upload 在同一事务内 SELECT MAX(version) → 校验 base_version == MAX → INSERT (MAX+1)，依赖 UNIQUE(task_id, version) 约束兜底，冲突返回 409
+- `sources.keywords`：关键词白名单（逗号分隔），标题包含任一关键词才收录；空 = 不过滤；仅匹配标题，不匹配正文
+- `tasks.token_used` 统计口径：仅执行阶段 LLM 调用累计 token，redo 重做后累加不清零；jobs.token_used 仅用于 collect/generate 类型 job（执行类型 job 的 token 全部计入 tasks.token_used，jobs.token_used 保持 NULL，避免重复统计）；stats 汇总 = SUM(tasks.token_used) + SUM(jobs.token_used WHERE type IN ('collect','generate'))
 
 ### 5.5 异步 job 生命周期
 
@@ -230,15 +244,15 @@ DELETE /api/v1/tasks/{id}                    # 级联：删 task_links、task_ta
 POST   /api/v1/tasks/{id}/move      {to_status}
 PUT    /api/v1/tasks/{id}/tags      {tag_ids}    # 替换语义：设置任务全部标签（重传完整数组）
 POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）
-POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：仅限 done/failed（已执行过）；status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）；其他状态 409
+POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：仅限 done 或 fail_count > 0（无 failed 状态）；status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）；其他 409
 POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数：仅限 fail_count > 0；其他 409（区别于 redo：不改变状态）
 ```
 
 ### 6.4 outputs
 
 ```
-GET    /api/v1/tasks/{id}/output              # 取最新版本 markdown 正文
-PUT    /api/v1/tasks/{id}/output              # 保存编辑：body 含 content + base_version；乐观锁校验（version 不匹配返回 409）；写新版本 + 落盘。前端 409 恢复：重新拉取最新版本并提示"已有更新，请基于最新版本继续编辑"（不自动 merge）
+GET    /api/v1/tasks/{id}/output              # 取最新版本 markdown 正文；无产物返回 {content: null, version: 0}
+PUT    /api/v1/tasks/{id}/output              # 保存编辑：body 含 content + base_version（无产物时 0 = 创建首版）；乐观锁校验（base_version != MAX 返回 409）；事务内原子递增写新版本 + 落盘。前端 409 恢复：重新拉取最新版本并提示"已有更新，请基于最新版本继续编辑"（不自动 merge）
 POST   /api/v1/tasks/{id}/output/upload       # 上传替换（multipart，同样写新版本）
 GET    /api/v1/tasks/{id}/output/versions     # 版本历史（全部版本行，含时间）
 GET    /api/v1/tasks/{id}/output/versions/{version}   # 导出指定历史版本内容
@@ -256,6 +270,8 @@ GET  /api/v1/jobs/{job_id}/stream             # SSE 单 job 进度订阅（可�
 GET  /api/v1/jobs/stream?type=                # SSE 全局推送（按 type 过滤，可选）
 ```
 
+SSE 认证：浏览器 EventSource 无法携带 Authorization header，SSE 端点定位为内部/服务端消费接口（Hermes 巡检、运维脚本用 Basic Auth 访问）；前端一律轮询，不使用 SSE。
+
 ### 6.6 stats / notifications / health / settings
 
 ```
@@ -270,13 +286,25 @@ PUT /api/v1/settings  {key: value}       # 更新单键（按 value_type 校验 
 
 settings 校验失败响应：400 + {error: {code: "INVALID_SETTING_VALUE", message}}，与全局错误格式一致。
 
+settings 初始键（S1 schema 初始化时写入，PUT 仅允许更新预定义键，未知键返回 400 UNKNOWN_SETTING）：
+
+| key | value_type | 默认值 | 说明 |
+|---|---|---|---|
+| score_todo_threshold | int | 8 | 生成分流：>= 阈值入 todo，否则 discard |
+| collect_interval_hours | int | 24 | 收集频率（cron 间隔参考） |
+| daily_budget_tokens | int | 50000 | 每日执行预算上限 |
+| score_dimensions | json | ["facts","verification","timeliness","value"] | 评分维度 |
+| generate_count | int | 10 | generate 默认候选数 |
+| done_column_limit | int | 50 | 看板 done 列默认加载条数 |
+| discard_retention_days | int | 7 | discard 热点保留天数 |
+
 ### 6.7 统一搜索
 
 ```
 GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 ```
 
-实现：三张 FTS 表分别 MATCH 后 UNION（rank 排序）；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。
+实现：三张 FTS 表分别 MATCH 后 UNION；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。排序：先按 entity_type 分组展示（组内按 bm25 rank 排序）——不同表的 bm25 分数不可直接跨表比较，不做跨表统一排序。
 
 与单表搜索的关系：/hotspots?q=、/tasks?q= 为单表 FTS 检索（页面内过滤），/search 为三表 UNION 全局检索；共用同一匹配实现，仅作用域不同。
 
@@ -287,9 +315,12 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - 乐观锁：outputs PUT 必须带 base_version
 - 限流：应用层请求频率限制 + 登录失败延迟；文档注明可升级 Cloudflare Access
 - 原子状态变更：所有任务状态变更（move / execute / redo / 过期完成）用条件 UPDATE（WHERE status IN 允许前置状态），rowcount=0 视为冲突返回 409，杜绝调度器 tick 与 API 并发竞态
-- job 去重粒度：type 级别（不区分候选集）；generate 显式传 hotspot_ids 在已有 running generate job 时同样返回已有 job_id，不享受例外
+- job 去重粒度：type 级别（不区分候选集）；generate 显式传 hotspot_ids 在已有 running generate job 时同样返回已有 job_id，不享受例外；去重命中时响应 {job_id, reused: true}，前端提示"已有进行中的任务"
 - execute 幂等兜底：执行器启动前检查 outputs 表——该 task 已有产物行且 status=done → 跳过（视为已执行）；status=done 但无产物（手动移入）→ 允许执行；redo 重置状态后重新可执行
 - DELETE source 并发安全：检查关联 → 删除在事务内完成（BEGIN IMMEDIATE check-then-delete）；collect job 仅处理 enabled=1 的来源（删除前需先 toggle 禁用，天然避免写入竞态）
+- job 部分成功语义：批量 job 部分失败 → 状态 done + result_ref 含 failed_items 明细（[{"task_id": 5, "error": "..."}]）；全部失败 → failed；error 字段存整体错误或首个错误
+- 每日预算闭环：execute job 启动时检查（今日 SUM(jobs.token_used collect/generate) + 预估执行成本 > daily_budget_tokens → job 直接 failed + budget_exceeded 通知，不执行）；执行中达到预算则停止后续任务，已完成保留
+- SQLite 外键：db.py 连接时 PRAGMA foreign_keys=ON；级联删除不依赖 ON DELETE CASCADE（需同步 FTS 触发器），由 services 层显式事务删除
 
 ## 7. 前端设计
 
@@ -301,6 +332,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - React Query：缓存 + 请求去重 + 乐观更新（解决卡顿）
 - @dnd-kit：看板拖拽
 - 布局：左侧窄栏导航 + 主内容区（解决左侧空白）
+- 认证：App 启动时检测本地凭据，无凭据显示登录表单（Basic Auth 用户名/密码）；凭据存 localStorage，fetch 封装自动附带 Authorization header；401 时清凭据回登录页
 
 ### 7.2 页面
 
@@ -356,6 +388,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 - 前端：React Query 错误态统一组件（重试按钮）；乐观更新失败自动回滚；网络错误 toast
 - 关键操作幂等：collect/generate/execute 重复触发不重复产出
 - 限流：应用层频率限制 + 登录失败延迟（防爆破）
+- 备份恢复：每日备份 = data/idea.db + outputs/ 目录（tar 打包）；恢复时若某 task 落盘文件缺失（备份后新增/外部误删），读时校验发现文件不存在 → 从 DB outputs 表最新版本重建文件
 
 ## 10. 测试策略
 
@@ -532,3 +565,36 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 16 | notifications.level 枚举未定义 | 采纳 | info/warn/error，前端角标蓝/黄/红（5.4 已改） |
 | 17 | token_used 统计口径未说明 | 采纳 | 执行阶段累计、redo 累加不清零；生成/评分计入 jobs.token_used；stats = SUM(tasks)+SUM(jobs)（5.4 已改） |
 | 18 | discard 清理的 FTS 测试未覆盖 | 采纳 | 单测必覆盖：删 hot_items 后 FTS 同步清除、搜索不返回已删结果（10 已改） |
+
+### 第六轮审阅回应（2026-08-14）
+
+高优先级（内部矛盾 / 实现阻塞）：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | outputs 复合主键与 FTS5 external content 冲突 | 采纳 | outputs 加自增 id 主键（content_rowid 映射），(task_id, version) 改 UNIQUE 约束；触发器按 id 定位删旧插新（5.1/5.3 已改） |
+| 2 | redo 的 failed 与四状态矛盾 | 采纳 | 不引入 failed 状态：执行失败 in_progress → waiting（fail_count+1）；redo 条件改为 done 或 fail_count > 0（5.2/6.3 已改） |
+| 3 | move 缺少状态迁移矩阵 | 采纳 | 补充完整迁移矩阵（todo/waiting/in_progress/done 双向规则 + 执行失败回退 + 过期 + 拖拽回炉）（5.2 已改） |
+| 4 | 评分维度"随目标可配"无配置源 | 采纳 | 维度来源 = settings.score_dimensions（默认四维，可调），不随 target_desc 变化（5.4 已改） |
+| 5 | outputs 首版与乐观锁并发未定义 | 采纳 | 首版由执行器创建 version=1；无产物时 GET 返回 version 0、PUT base_version=0 创建首版；事务内原子递增 + UNIQUE 兜底 409（5.4/6.4 已改） |
+| 6 | settings 键集合与默认值缺失 | 采纳 | 列出 7 个初始键及默认值；PUT 仅允许预定义键（6.6 已改） |
+
+中优先级（语义缺口 / 运行时风险）：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 7 | 每日预算缺少执行闭环 | 采纳 | execute job 启动时检查预算，超限直接 failed + budget_exceeded 通知；执行中达预算停止后续任务（6.8 已改） |
+| 8 | job 部分成功语义不清 | 采纳 | 部分失败 → done + result_ref.failed_items 明细；全部失败 → failed（6.8 已改） |
+| 9 | token 统计可能重复 | 采纳 | jobs.token_used 仅 collect/generate 类型；execute job 的 token 全入 tasks.token_used（5.4 已改） |
+| 10 | 备份未覆盖落盘产物 | 采纳 | 每日备份含 outputs/ 目录；恢复时文件缺失由 DB 重建（D13/9 已改） |
+| 11 | SSE 与 Basic Auth 不兼容 | 采纳 | SSE 定位为内部/服务端消费接口（Basic Auth 可访问）；前端一律轮询（6.5 已改） |
+| 12 | FTS5 中文 tokenizer 未定义 | 采纳 | 全部用 tokenize='trigram'（中文 3-gram 可检索）；统一搜索按 entity_type 分组、组内 bm25 排序，不做跨表 rank 比较（5.1/6.7 已改） |
+
+低优先级（实现细节）：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 13 | 去重返回已有 job_id 前端不透明 | 采纳 | 响应加 {job_id, reused: true}，前端提示（6.8 已改） |
+| 14 | sources.keywords 语义未定义 | 采纳 | 标题关键词白名单（逗号分隔），空 = 不过滤，仅匹配标题（5.4 已改） |
+| 15 | SQLite 外键约束未说明 | 采纳 | PRAGMA foreign_keys=ON；级联删除由 services 显式事务处理（6.8 已改） |
+| 16 | 前端 Basic Auth 凭据管理未定义 | 采纳 | 登录表单 + localStorage 存凭据 + 401 回登录页（7.1 已改） |
