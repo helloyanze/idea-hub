@@ -36,6 +36,17 @@ uv pip install --python .venv/bin/python -r requirements.txt
 echo "==> 创建运行时目录"
 mkdir -p data outputs backups logs prompts
 cp -n scripts/deploy/prompts/*.txt prompts/ 2>/dev/null || true
+# 覆盖部署最新的执行 prompt（complex-execute.txt 为新增，generate.txt 为更新版）
+cp -f scripts/deploy/prompts/complex-execute.txt scripts/deploy/prompts/generate.txt prompts/ 2>/dev/null || true
+
+echo "==> 部署调度器健康监控脚本（crontab 每 15 分钟调用）"
+mkdir -p scripts/deploy
+if [ -f scripts/deploy/healthcheck.sh ]; then
+    chmod +x scripts/deploy/healthcheck.sh
+    echo "    scripts/deploy/healthcheck.sh 已就绪"
+else
+    echo "    scripts/deploy/healthcheck.sh 缺失！请确认 scripts/deploy/ 已随代码上传"
+fi
 
 echo "==> 安装 Hermes Agent（用户级）"
 if ! command -v hermes >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/hermes" ]; then
