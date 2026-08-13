@@ -24,10 +24,18 @@
      "dims": "{\"热度\":8,\"相关性\":7,\"可执行性\":6,\"预期价值\":7}",
      "tags": "1,2",
      "detail": "构思全文：切入角度、目标读者、内容方向、结构要点（300-500字）",
+     "content_type": "short",
+     "expire_at": "2026-08-14T00:00:00",
      "related_task_id": null
    }
    ```
    - tags：从步骤 2 的标签列表选 1-3 个最贴切的（id，逗号分隔）。判断依据：内容主题、技术栈、内容类型。宁可少打不要乱打。
+   - 每条元素结构（新增字段）：
+     "content_type": "short|long|video_script"  # 必填。判定规则：
+        热点事件/观点评论/时效性强 → short；深度话题/教程/知识梳理 → long；
+        操作演示/流程向 → video_script
+     "expire_at": "YYYY-MM-DDTHH:MM:SS" 或 null  # 时效截止（ISO），
+        时效强的热点（百度热搜等）给较短有效期（如次日 0 点），深度话题给 null（不失效）
    - 若某热点与现有任务相关：填 related_task_id 为任务 id，title/summary 可不填（填了也忽略），detail 写"新增关联信息"（该热点带来的新角度），score/dims 为关联后的新评分。
    - 用 write_file 或 heredoc 写入文件。**必须确保文件是合法 JSON**（可用 python -m json.tool 校验）。
 

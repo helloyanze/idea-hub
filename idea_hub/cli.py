@@ -78,7 +78,9 @@ def cmd_import_ideas(args):
                                  (task["id"], item["hot_item_id"]))
                 models.update_task(conn, task["id"], feasibility_score=item["score"],
                                    score_breakdown=item["dims"],
-                                   idea_path=_write_draft(args.base, task["id"], content + "\n\n" + addition))
+                                   idea_path=_write_draft(args.base, task["id"], content + "\n\n" + addition),
+                                   content_type=item.get("content_type") or task.get("content_type") or "long",
+                                   expire_at=item.get("expire_at") or task.get("expire_at"))
                 task2 = models.get_task(conn, task["id"])
                 if task2["feasibility_score"] >= models.SCORE_TODO and task2["status"] == "archived":
                     if _todo_quota_ok(conn):
@@ -91,7 +93,9 @@ def cmd_import_ideas(args):
                                          target_id=models.get_active_target(conn)["id"],
                                          hot_item_id=item.get("hot_item_id"),
                                          feasibility_score=item["score"],
-                                         score_breakdown=item["dims"], idea_path="")
+                                         score_breakdown=item["dims"], idea_path="",
+                                         content_type=item.get("content_type", "long"),
+                                         expire_at=item.get("expire_at"))
                 if tid is None:
                     results.append({"hot_item_id": item.get("hot_item_id"),
                                     "discarded": True, "reason": "score < 6"})
@@ -126,7 +130,8 @@ def cmd_add_idea(args):
     tid = models.create_task(conn, title=args.title, idea_summary=args.summary,
                              target_id=models.get_active_target(conn)["id"],
                              hot_item_id=args.hot_item_id, feasibility_score=args.score,
-                             score_breakdown=args.dims, idea_path="")
+                             score_breakdown=args.dims, idea_path="",
+                             content_type=args.content_type, expire_at=args.expire_at)
     if tid is None:
         print("discarded (score < 6)")  # 新阈值：<6 舍弃
         return
@@ -273,6 +278,8 @@ def main():
     pa.add_argument("--dims", required=True)
     pa.add_argument("--detail-path", required=True)
     pa.add_argument("--tags", default="", help="标签 id 列表，逗号分隔（如 1,2,3）")
+    pa.add_argument("--content-type", default="long", help="内容类型：short/long/video_script（默认 long）")
+    pa.add_argument("--expire-at", default=None, help="时效截止 ISO 时间（如 2026-08-20T00:00:00），无时效留空")
     pa.set_defaults(func=cmd_add_idea)
     pi = sub.add_parser("import-ideas")
     pi.add_argument("--file", required=True, help="idea JSON 文件路径（数组）")
