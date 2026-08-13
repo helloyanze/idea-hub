@@ -43,7 +43,7 @@ Idea Hub v1（2026-08-11 ~ 08-13 快速迭代，70+ 提交）功能覆盖收集�
 | D13 | 保留：SQLite WAL + 每日备份、cron 调度、Basic Auth、Cloudflare Tunnel | 已验证可用，不重写 |
 | D14 | 生成编排本地化：ideahub 直接调用 DeepSeek LLM 生成 idea（复用执行器的 LLM 调用层 + 生成 prompt 模板），不依赖 Hermes 在线；Hermes 仅作 QQ 交互层（查询/推送/操作） | 消除 ideahub ↔ Hermes 循环耦合；cron 全自动运行不依赖 Hermes 可用性；LLM 调用层已被 executor 验证 |
 | D15 | 长任务异步化：pipeline 端点（collect/generate/execute）立即返回 job_id，jobs 表追踪进度，前端轮询（可选 SSE） | 避免请求挂起超时，用户可见进度 |
-| D16 | 产物版本：outputs 表每版本一行，(task_id, version) 联合主键；PUT/上传写入新版本行 + 落盘，不覆盖旧版本 | 支持真实版本历史回溯 |
+| D16 | 产物版本：outputs 表每版本一行，(task_id, version) 联合主键；PUT/上传写入新版本行并更新落盘文件（文件仅保留最新版，历史版本存 DB 可导出）；外部文件回写不递增版本 | 支持真实版本历史回溯，避免自动保存产生垃圾版本 |
 
 ## 4. 整体架构
 
@@ -102,7 +102,7 @@ web/
     main.tsx
     App.tsx              # 布局壳：左侧导航 + 主内容区 + 暗色切换
     api/client.ts        # fetch 封装 + 错误统一处理
-    api/hooks.ts         # React Query hooks（含 job 轮询 hook）
+    api/hooks/           # React Query hooks 按领域拆分（sources/tasks/outputs/jobs/stats/notifications/search），含 job 轮询 hook
     components/
       kanban/            # 看板列、卡片（@dnd-kit 拖拽）
       score/             # 评分徽章、多维评分条、总分色阶
@@ -128,8 +128,8 @@ web/
 | 表 | 字段要点 | 说明 |
 |---|---|---|
 | `sources` | id, type, name, url, enabled, items_path, title_field, keywords, ttl_hours, channel_config | type 含新增渠道；channel_config 存渠道特定配置（JSON）；ttl_hours = 热点时效窗口（见 5.4） |
-| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date 用于 discard 清理；UNIQUE(source_id, url) 防重复 |
-| `tasks` | id, title, idea_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, idea_path, output_path, ai_summary, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4 |
+| `hot_items` | id, source_id, title, url, content_snapshot, collected_at, final_score, verdict, collected_date | verdict: admit/discard；content_snapshot 截断至 2000 字符；collected_date = DATE(collected_at) 冗余列，专供 discard 清理查询避免函数索引，建 (verdict, collected_date) 联合索引；UNIQUE(source_id, url) 防重复 |
+| `tasks` | id, title, idea_summary, content_type, status, feasibility_score, score_breakdown, target_desc, expire_at, idea_path, ai_summary, token_used, fail_count, last_fail_reason, redo_note, notes, created_at, updated_at, completed_at | status: todo/waiting/in_progress/done；target_desc 为文本（替代 target_id，见 D8）；expire_at 过期逻辑见 5.4；content_type 枚举与 score_breakdown 格式见 5.4；idea_path = 构思全文落盘路径（相对 base）；产物路径为固定模式 outputs/tasks/<id>/output.md，由 task_id 推导，不存字段 |
 | `task_links` | task_id, hot_item_id | 多对多关联 |
 | `tags` | id, name UNIQUE, color | name 唯一约束 |
 | `task_tags` | task_id, tag_id | 标签关联 |
@@ -163,10 +163,11 @@ web/
 
 ### 5.3 产出双写与一致性
 
-- 落盘：`outputs/tasks/<id>/output.md`（最新版本内容）
+- 落盘：`outputs/tasks/<id>/output.md`（仅最新版本；历史版本只存 DB，可通过版本 API 导出）
 - 双写：outputs 表每版本一行（content 缓存 + file_mtime + file_hash）
 - Web 编辑（PUT）/ 上传：写新版本行（version = max+1）+ 更新落盘文件 + FTS 经触发器刷新
-- 外部文件变更检测：读取产物时以文件为准，对比 file_mtime/file_hash，不一致则自动回写 DB（新版本）与 FTS；不做常驻 watchdog（个人系统，读时校验足够）
+- 外部文件变更检测：读取产物时以文件为准，对比 file_mtime/file_hash，不一致则回写 DB 与 FTS，**不递增版本**（更新当前版本行内容，防编辑器自动保存产生垃圾版本）；不做常驻 watchdog（个人系统，读时校验足够）
+- FTS 索引范围：outputs_fts 仅索引每个 task 的最新版本（触发器判断 version = MAX），FTS 中每个 task 至多一行，避免版本行膨胀与分组复杂度
 
 ### 5.4 字段语义
 
@@ -174,11 +175,13 @@ web/
 - `tasks.expire_at`：任务时效。过期任务由调度器自动完成（move → done + 通知），仅限 todo/waiting；in_progress 跳过并发警告；人工操作不受限
 - `hot_items.content_snapshot`：截断至 2000 字符，防长文膨胀 FTS 索引
 - `hot_items` 清理策略：discard 热点保留 7 天，调度器每日清理（删行 + FTS 触发器同步）
+- `tasks.content_type` 枚举：article（文章，默认）/ video_script（视频脚本）/ tweet（短文）/ newsletter（简报）；生成时由 LLM 根据热点类型与 target_desc 判定，手动建任务可指定
+- `tasks.score_breakdown`：JSON 字符串，多维评分明细，如 {"facts": 8, "verification": 7, "timeliness": 9, "value": 8}（维度随目标可配）；feasibility_score = 各维度加权均值（四舍五入）
 
 ### 5.5 异步 job 生命周期
 
 - 状态流转：pending → running → done/failed
-- 心跳：子步骤边界更新（每处理完一个 candidate / 一篇产物 / 一个来源）及 LLM 调用前；LLM 单次调用超时 120s，重试前刷新心跳；stale 阈值 5min 不变（单步耗时 < 5min，不会误判）
+- 心跳：子步骤边界更新（每处理完一个 candidate / 一篇产物 / 一个来源）及每次 LLM 尝试前；LLM 单次超时 90s、最多重试 2 次（共 3 次尝试，最坏 270s < 300s 阈值），每次尝试前刷新心跳；stale 阈值 5min
 - 崩溃恢复：调度器 tick 发现 running 且 heartbeat_at 超过 5 分钟未更新 → 标记 failed + 写通知
 - job 去重：同类型 job 已有 running 时，POST 返回已有 job_id（不新建）
 - result_ref 格式：JSON 字符串，如 {"task_ids": [1,2,3]}（execute/generate）、{"hotspot_count": 42}（collect）
@@ -194,7 +197,7 @@ GET    /api/v1/sources                # 列表（含 channel_config）
 POST   /api/v1/sources                # 新建
 PATCH  /api/v1/sources/{id}           # 编辑（含 ttl_hours）
 POST   /api/v1/sources/{id}/toggle    # 启停
-DELETE /api/v1/sources/{id}
+DELETE /api/v1/sources/{id}             # 仅允许无关联 hot_items 的来源；有关联返回 409（应改用 toggle 禁用）
 POST   /api/v1/sources/{id}/test      # 测试抓取（验证渠道可用性）
 ```
 
@@ -205,16 +208,18 @@ GET /api/v1/hotspots?page=&size=&source_id=&verdict=&q=   # 列表 + 过滤 + FT
 GET /api/v1/hotspots/{id}
 ```
 
+q= 走 hot_items_fts 单表检索（页面内过滤）；跨表全局搜索用 /api/v1/search（见 6.7）。tasks?q= 同理走 tasks_fts。
+
 ### 6.3 tasks
 
 ```
 GET    /api/v1/tasks?status=&page=&size=&q=&tag=
 GET    /api/v1/tasks/{id}                    # 详情（含 tags、关联热点、产物）
-POST   /api/v1/tasks                         # 手动建任务
+POST   /api/v1/tasks                         # 手动建任务：必填 title、content_type；可选 idea_summary、feasibility_score（默认 0）、score_breakdown、target_desc、notes、hotspot_id（关联热点）；status 默认 todo
 PATCH  /api/v1/tasks/{id}                    # 编辑（标题/摘要/评分/备注）
-DELETE /api/v1/tasks/{id}
+DELETE /api/v1/tasks/{id}                    # 级联：删 task_links、task_tags、outputs 行与落盘文件（outputs/tasks/<id>/ 目录）；notifications 与 jobs 历史保留（跳转 404 时提示"任务已删除"）
 POST   /api/v1/tasks/{id}/move      {to_status}
-POST   /api/v1/tasks/{id}/tags      {tag_ids}
+PUT    /api/v1/tasks/{id}/tags      {tag_ids}    # 替换语义：设置任务全部标签（重传完整数组）
 POST   /api/v1/tasks/{id}/execute           # 触发执行（异步，返回 job_id）
 POST   /api/v1/tasks/{id}/redo  {note?}     # 重做：status→waiting、fail_count 清零；redo_note 存时间戳+备注（无 note 仅存时间戳）
 POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数（区别于 redo：不改变状态）
@@ -224,16 +229,17 @@ POST   /api/v1/tasks/{id}/reset-failures    # 清零失败计数（区别于 red
 
 ```
 GET    /api/v1/tasks/{id}/output              # 取最新版本 markdown 正文
-PUT    /api/v1/tasks/{id}/output              # 保存编辑：body 含 content + base_version；乐观锁校验（version 不匹配返回 409）；写新版本 + 落盘
+PUT    /api/v1/tasks/{id}/output              # 保存编辑：body 含 content + base_version；乐观锁校验（version 不匹配返回 409）；写新版本 + 落盘。前端 409 恢复：重新拉取最新版本并提示"已有更新，请基于最新版本继续编辑"（不自动 merge）
 POST   /api/v1/tasks/{id}/output/upload       # 上传替换（multipart，同样写新版本）
 GET    /api/v1/tasks/{id}/output/versions     # 版本历史（全部版本行，含时间）
+GET    /api/v1/tasks/{id}/output/versions/{version}   # 导出指定历史版本内容
 ```
 
 ### 6.5 pipeline（异步）
 
 ```
 POST /api/v1/collect    {source_ids?: []}     # 立即返回 {job_id}；省略 source_ids = 全部启用来源
-POST /api/v1/generate                         # 生成 idea（本地 LLM），返回 {job_id}
+POST /api/v1/generate  {count?, hotspot_ids?} # 生成 idea（本地 LLM），返回 {job_id}；候选策略：verdict=admit 且未关联 task 且未过期（collected_at + ttl_hours > now），按 final_score 降序取前 N（默认 10，settings 可配）；可选显式指定 hotspot_ids 或 count
 POST /api/v1/execute    {task_ids: []}        # task_ids 必填（至少 1 个）；执行全部需显式列出
 GET  /api/v1/jobs/{job_id}                    # 查询进度 {status, progress, result_ref, error}
 GET  /api/v1/jobs?type=&status=&page=         # 任务列表
@@ -241,7 +247,7 @@ GET  /api/v1/jobs/{job_id}/stream             # SSE 单 job 进度订阅（可�
 GET  /api/v1/jobs/stream?type=                # SSE 全局推送（按 type 过滤，可选）
 ```
 
-### 6.6 stats / notifications / health
+### 6.6 stats / notifications / health / settings
 
 ```
 GET  /api/v1/stats                           # 队列计数 + token 用量 + 今日产出 + 活跃 job
@@ -249,6 +255,8 @@ GET  /api/v1/notifications?unread_only=&entity_type=&entity_id=
 POST /api/v1/notifications/{id}/read
 POST /api/v1/notifications/read-all
 GET  /api/v1/health                          # 调度器心跳 + 数据库健康
+GET /api/v1/settings                     # 全部动态参数（评分阈值、收集频率、每日预算上限等）
+PUT /api/v1/settings  {key: value}       # 更新单键（按 value_type 校验 int/float/string/json）
 ```
 
 ### 6.7 统一搜索
@@ -259,12 +267,15 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 
 实现：三张 FTS 表分别 MATCH 后 UNION（rank 排序）；每条结果标注 entity_type（hotspot/task/output）+ entity_id，前端据此跳转。支持过滤器扩展（entity_type=、source_id=、status=）。
 
+与单表搜索的关系：/hotspots?q=、/tasks?q= 为单表 FTS 检索（页面内过滤），/search 为三表 UNION 全局检索；共用同一匹配实现，仅作用域不同。
+
 ### 6.8 统一约定
 
 - 长任务端点一律异步：立即返回 job_id，不阻塞 HTTP 请求
 - 写操作幂等：collect/generate/execute 重复触发不重复产出（同类型 running job 去重，返回已有 job_id；执行器幂等兜底）
 - 乐观锁：outputs PUT 必须带 base_version
 - 限流：应用层请求频率限制 + 登录失败延迟；文档注明可升级 Cloudflare Access
+- 原子状态变更：所有任务状态变更（move / execute / redo / 过期完成）用条件 UPDATE（WHERE status IN 允许前置状态），rowcount=0 视为冲突返回 409，杜绝调度器 tick 与 API 并发竞态
 
 ## 7. 前端设计
 
@@ -272,7 +283,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 
 - Vite + React 18 + TypeScript
 - shadcn/ui（Radix 原语 + Tailwind），简约风
-- 暗色模式：next-themes（跟随系统 + 手动切换）
+- 暗色模式：Tailwind darkMode: 'class' + 轻量 React Context（跟随系统 + 手动切换）；不引入 next-themes（面向 Next.js，本项目为 Vite SPA）
 - React Query：缓存 + 请求去重 + 乐观更新（解决卡顿）
 - @dnd-kit：看板拖拽
 - 布局：左侧窄栏导航 + 主内容区（解决左侧空白）
@@ -393,7 +404,7 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 | 16 | discard 热点长期累积 | 采纳 | 保留 7 天，调度器每日清理（5.4 已改） |
 | 17 | settings 并入文件后运行时不可调 | 采纳 | 分层：静态配置入 config 文件，动态参数入 settings 表（D9 修订，5.1 已加 settings 表） |
 | 18 | S1 迁移框架与 D3 混淆 | 采纳 | 注明 schema_version 仅为未来演进预留，本次不迁移数据（5.1 已注） |
-| 19 | Basic Auth 无限流 | 采纳 | 应用层限流 + 登录失败延迟；可升级 Cloudflare Access（6.7/9 已改） |
+| 19 | Basic Auth 无限流 | 采纳 | 应用层限流 + 登录失败延迟；可升级 Cloudflare Access（6.8/9 已改） |
 | 20 | execute task_ids 可选危险 | 采纳 | task_ids 必填（至少 1 个），执行全部需显式列出（6.5 已改） |
 
 ### 四、总体评价采纳
@@ -421,3 +432,47 @@ GET /api/v1/search?q=&page=&size=     # 跨热点/任务/产物统一检索
 |---|---|---|---|
 | 1 | 缺统一搜索 API：FTS5 已建好无消费入口 | 采纳 | 新增 GET /api/v1/search?q=&page=&size=，UNION 三表，每条标注 entity_type + entity_id，前端可跳转（6.7 已加，S7 交付） |
 | 2 | 心跳 30s 定时与阻塞 LLM 调用冲突，会被误判崩溃 | 采纳 | 心跳改为子步骤边界 + LLM 调用前更新；LLM 单次超时 120s，重试前刷新心跳；stale 阈值 5min 不变，单步耗时 < 5min 不误判（5.5 已改） |
+
+### 第四轮审阅回应（2026-08-14）
+
+一、内部不一致 / 矛盾：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 1 | 6.7/6.8 编号错位，审阅表 19 条交叉引用错误 | 采纳 | 第 19 条引用修正为 6.8/9（已改）；6.7 统一搜索 / 6.8 统一约定编号确认无误 |
+| 2 | 统一搜索与单表 q= 关系未说明 | 采纳 | 明确：/hotspots?q=、/tasks?q= 走单表 FTS（页面内过滤），/search 走三表 UNION 全局检索，共用匹配实现（6.2/6.7 已改） |
+| 3 | 心跳与 stale 阈值安全边际 | 采纳 | LLM 单次超时降为 90s、最多重试 2 次（共 3 次尝试，最坏 270s < 300s），每次尝试前刷新心跳（5.5 已改） |
+| 4 | collected_date 与 collected_at 冗余 | 采纳 | 保留冗余列并说明理由：避免 DATE() 函数索引，建 (verdict, collected_date) 联合索引（5.1 已改） |
+
+二、设计缺口 / 未定义行为：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 5 | idea_path/output_path 语义未定义 | 采纳 | idea_path = 构思全文落盘路径（相对 base）；output_path 删除，产物路径为固定模式由 task_id 推导（5.1 已改） |
+| 6 | 删除 source 关联处理未定义 | 采纳 | 仅允许删除无关联 hot_items 的来源，有关联返回 409（6.1 已改） |
+| 7 | 删除 task 级联未定义 | 采纳 | 级联删 task_links/task_tags/outputs 行与落盘文件；notifications 与 jobs 历史保留（6.3 已改） |
+| 8 | content_type 枚举未定义 | 采纳 | article/video_script/tweet/newsletter，生成时 LLM 判定，手动可指定（5.4 已改） |
+| 9 | generate 候选策略黑盒 | 采纳 | 候选 = verdict=admit 且未关联 task 且未过期，按 final_score 降序取前 N（默认 10）；支持 hotspot_ids/count 覆盖（6.5 已改） |
+| 10 | 文件层仅最新版与 D16 矛盾 | 采纳 | 明确：文件仅保留最新版，历史版本存 DB 并可导出（新增 versions/{version} 端点）；D16 措辞修正（5.3/6.4 已改） |
+| 11 | settings 缺 API 端点 | 采纳 | 新增 GET/PUT /api/v1/settings（6.6 已改） |
+| 12 | POST /tasks 请求体未定义 | 采纳 | 必填 title/content_type，可选评分/摘要/关联热点，status 默认 todo（6.3 已改） |
+
+三、潜在运行时问题：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 13 | outputs_fts 版本行膨胀 | 采纳 | FTS 仅索引每个 task 最新版本（触发器判断 version = MAX），FTS 中每 task 至多一行（5.3 已改） |
+| 14 | 外部变更回写版本膨胀 | 采纳 | 外部文件回写不递增版本，更新当前版本行内容（5.3 已改） |
+| 15 | 乐观锁 409 与外部修改冲突 | 采纳 | 前端 409 恢复：重新拉取最新版本并提示基于最新版继续编辑，不做自动 merge（6.4 已改） |
+| 16 | 调度器与 API 并发竞态 | 采纳 | 所有状态变更用条件 UPDATE（WHERE status IN 允许前置状态），rowcount=0 返回 409（6.8 已改） |
+
+四、细微问题：
+
+| # | 意见 | 决定 | 处理 |
+|---|---|---|---|
+| 17 | feasibility_score 与 score_breakdown 关系未定义 | 采纳 | score_breakdown 为 JSON 维度明细，feasibility_score = 加权均值四舍五入（5.4 已改） |
+| 18 | tags 端点语义不明 | 采纳 | 改为 PUT 替换语义：设置任务全部标签（6.3 已改） |
+| 19 | next-themes 面向 Next.js 不适用 | 采纳 | 改 Tailwind darkMode class + React Context，不引入 next-themes（7.1 已改） |
+| 20 | api/hooks.ts 过于集中 | 采纳 | 按领域拆分为 api/hooks/ 目录（4.2 已改） |
+
+审阅总结中"硬伤"（#5/#6/#7/#10/#11）、"模糊"（#2/#8/#9/#12/#17/#18）、"运行时风险"（#13/#14/#16）全部按上表落实。
