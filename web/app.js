@@ -464,9 +464,10 @@ function renderSources() {
       toast(`正在编辑：${s.name}`, "ok");
     });
     row.querySelector("[data-toggle]").addEventListener("click", async e => {
+      const el = e.currentTarget;
       await api.post(`/api/sources/${s.id}/toggle`);
       s.enabled = !s.enabled;
-      e.currentTarget.classList.toggle("on", s.enabled);
+      el.classList.toggle("on", s.enabled);
       toast(`${s.name} 已${s.enabled ? "启用" : "停用"}`);
     });
     row.querySelector("[data-del]").addEventListener("click", async () => {
@@ -527,9 +528,10 @@ function renderTags() {
       <div class="switch ${t.is_active ? "on" : ""}" data-toggle><span class="track"></span></div>
       <button class="mini danger" data-del>删除</button>`;
     row.querySelector("[data-toggle]").addEventListener("click", async e => {
+      const el = e.currentTarget;
       await api.post(`/api/tags/${t.id}/toggle`);
       t.is_active = !t.is_active;
-      e.currentTarget.classList.toggle("on", t.is_active);
+      el.classList.toggle("on", t.is_active);
     });
     row.querySelector("[data-del]").addEventListener("click", async () => {
       await api.delete(`/api/tags/${t.id}`);
