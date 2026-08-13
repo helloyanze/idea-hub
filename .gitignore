@@ -11,6 +11,10 @@ backups/
 *.pem
 *.json
 !web/vendor/*.json
+# web 前端脚手架配置文件（Vite/TS/shadcn 必需，纳入版本控制）
+!web/package.json
+!web/tsconfig*.json
+!web/components.json
 sub*.yaml
 config*.yaml
 .superpowers/
