@@ -18,3 +18,4 @@ backups/
 sub*.yaml
 config*.yaml
 .superpowers/
+data_v1_backup/
