@@ -43,7 +43,7 @@ def _expire_tasks(conn) -> int:
         "SELECT id, title FROM tasks "
         "WHERE status IN ('todo','waiting') "
         "AND expire_at IS NOT NULL "
-        "AND expire_at < datetime('now')"
+        "AND datetime(expire_at) < datetime('now')"
     ).fetchall()
     cursor = conn.execute(
         "UPDATE tasks SET status='done', completed_at=datetime('now'), "
@@ -51,7 +51,7 @@ def _expire_tasks(conn) -> int:
         "THEN '已过期自动完成' ELSE notes || char(10) || '已过期自动完成' END "
         "WHERE status IN ('todo','waiting') "
         "AND expire_at IS NOT NULL "
-        "AND expire_at < datetime('now')"
+        "AND datetime(expire_at) < datetime('now')"
     )
     for row in rows:
         emit(

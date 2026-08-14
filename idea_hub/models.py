@@ -23,7 +23,7 @@ def create_task(conn, *, title, idea_summary, target_id, hot_item_id=None,
             "FROM hot_items h JOIN sources s ON s.id = h.source_id "
             "WHERE h.id=? AND s.ttl_hours IS NOT NULL", (hot_item_id,)).fetchone()
         if row and row["e"]:
-            expire_at = row["e"].replace(" ", "T")
+            expire_at = row["e"]
     cur = conn.execute(
         "INSERT INTO tasks (title, idea_summary, idea_path, hot_item_id, target_id, status, "
         "feasibility_score, score_breakdown, notes, content_type, expire_at) "

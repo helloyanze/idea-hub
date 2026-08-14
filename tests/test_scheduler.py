@@ -124,6 +124,69 @@ def test_tick_expires_todo_and_waiting_tasks(conn, quiet, tmp_path):
     assert all(n["entity_type"] == "task" for n in notifs)
 
 
+def test_tick_expires_same_day_past_task_only(conn, quiet, tmp_path):
+    past = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    tomorrow = (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    past_task_id = conn.execute(
+        "INSERT INTO tasks (title, status, expire_at) "
+        "VALUES ('past-today', 'todo', ?)",
+        (past,),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO tasks (title, status, expire_at) "
+        "VALUES ('tomorrow', 'todo', ?)",
+        (tomorrow,),
+    )
+    conn.commit()
+
+    result = scheduler.tick(conn, make_config(tmp_path))
+
+    assert result["expired_count"] == 1
+    rows = {
+        row["title"]: row["status"]
+        for row in conn.execute("SELECT title, status FROM tasks").fetchall()
+    }
+    assert rows["past-today"] == "done"
+    assert rows["tomorrow"] == "todo"
+    notification = conn.execute(
+        "SELECT type, entity_type, entity_id FROM notifications "
+        "WHERE type = 'task_expired'"
+    ).fetchone()
+    assert notification["type"] == "task_expired"
+    assert notification["entity_type"] == "task"
+    assert notification["entity_id"] == past_task_id
+
+
+def test_tick_expires_legacy_t_format_task(conn, quiet, tmp_path):
+    legacy_expire_at = (
+        datetime.now(timezone.utc) - timedelta(hours=2)
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+    task_id = conn.execute(
+        "INSERT INTO tasks (title, status, expire_at) "
+        "VALUES ('legacy-t-format', 'todo', ?)",
+        (legacy_expire_at,),
+    ).lastrowid
+    conn.commit()
+
+    result = scheduler.tick(conn, make_config(tmp_path))
+
+    assert result["expired_count"] == 1
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert row["status"] == "done"
+    notification = conn.execute(
+        "SELECT type FROM notifications "
+        "WHERE type = 'task_expired' AND entity_id = ?",
+        (task_id,),
+    ).fetchone()
+    assert notification["type"] == "task_expired"
+
+
 def test_tick_skips_in_progress_expired_task(conn, quiet, tmp_path):
     old = _past_str(60)
     conn.execute(

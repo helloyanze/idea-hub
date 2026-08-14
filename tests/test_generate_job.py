@@ -7,6 +7,7 @@ LLM 失败 → failed + job_failed、无候选 → done(0)、生成数少于候�
 端点层：无 api_key 400（生成不能降级）、dedup running generate job、job 创建、auth 401。
 """
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
@@ -90,6 +91,10 @@ def test_create_from_generation_inherits_hotspot_fields(conn, tmp_path):
     assert row["feasibility_score"] == 9  # 继承热点 final_score
     assert json.loads(row["score_breakdown"]) == {"facts": 9, "value": 8}  # 继承热点 JSON
     assert row["expire_at"] == "2026-08-15 10:00:00"  # collected_at + ttl_hours
+    assert "T" not in row["expire_at"]
+    assert re.fullmatch(
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", row["expire_at"]
+    )
 
     link = conn.execute(
         "SELECT hot_item_id FROM task_links WHERE task_id = ?", (tid,)
