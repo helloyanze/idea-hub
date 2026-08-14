@@ -4,6 +4,19 @@
 TAG_COLORS = ["#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16"]
 
 
+def list_tags(conn) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT t.id, t.name, t.color, COUNT(tt.tag_id) AS task_count
+        FROM tags t
+        LEFT JOIN task_tags tt ON tt.tag_id = t.id
+        GROUP BY t.id
+        ORDER BY t.id
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def upsert_by_names(conn, names: list[str]) -> list[int]:
     """按名称创建或复用标签，并返回对应 ID。"""
     cleaned_names = []
