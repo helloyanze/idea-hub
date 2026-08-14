@@ -22,6 +22,9 @@ from .routers.hotspots import router as hotspots_router
 from .routers.tags import router as tags_router
 from .routers.tasks import router as tasks_router
 from .routers.outputs import router as outputs_router
+from .routers.notifications import router as notifications_router
+from .routers.stats import router as stats_router
+from .routers.search import router as search_router
 
 
 _basic = HTTPBasic(auto_error=False)
@@ -159,6 +162,9 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(tags_router, dependencies=[Depends(require_auth)])
     app.include_router(tasks_router, dependencies=[Depends(require_auth)])
     app.include_router(outputs_router, dependencies=[Depends(require_auth)])
+    app.include_router(notifications_router, dependencies=[Depends(require_auth)])
+    app.include_router(stats_router, dependencies=[Depends(require_auth)])
+    app.include_router(search_router, dependencies=[Depends(require_auth)])
     app.add_middleware(
         CORSMiddleware,
         allow_origins=getattr(config, "cors_origins", ["http://localhost:5173"]),
