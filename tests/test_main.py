@@ -94,3 +94,37 @@ def test_cors_dev_origin_allowed(tmp_path):
     )
     assert resp.status_code == 200
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_spa_fallback_serves_index_html(tmp_path):
+    static_dir = tmp_path / "web"
+    static_dir.mkdir()
+    index_html = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><div id=\"root\"></div></body></html>"
+    (static_dir / "index.html").write_text(index_html, encoding="utf-8")
+    assets_dir = static_dir / "assets"
+    assets_dir.mkdir()
+    app_js = 'console.log("hi")'
+    (assets_dir / "app.js").write_text(app_js, encoding="utf-8")
+
+    client = TestClient(create_app(make_config(tmp_path), static_dir=str(static_dir)))
+
+    resp = client.get("/kanban")
+    assert resp.status_code == 200
+    assert '<div id="root">' in resp.text
+    resp = client.get("/assets/app.js")
+    assert resp.status_code == 200
+    assert resp.text == app_js
+
+
+def test_spa_fallback_does_not_shadow_api(tmp_path):
+    static_dir = tmp_path / "web"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text(
+        "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(make_config(tmp_path), static_dir=str(static_dir)))
+
+    assert client.get("/api/v1/health", auth=AUTH).status_code == 200
+    assert client.get("/api/v1/nonexistent-route").status_code == 404

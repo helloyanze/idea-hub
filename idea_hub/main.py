@@ -3,14 +3,18 @@
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 import secrets
+import stat
 import time
 from typing import Deque
 from pathlib import Path
+
+import anyio
 from fastapi.staticfiles import StaticFiles
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.cors import CORSMiddleware
 
 from . import db
@@ -64,6 +68,21 @@ def scheduler_status(last_tick: datetime | None) -> tuple[str, datetime | None]:
     if now - last_tick > timedelta(minutes=10):
         return ("unhealthy", last_tick)
     return ("running", last_tick)
+
+
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path.startswith("api"):
+                raise
+            full_path, stat_result = await anyio.to_thread.run_sync(
+                self.lookup_path, "index.html"
+            )
+            if stat_result is not None and stat.S_ISREG(stat_result.st_mode):
+                return FileResponse(full_path, stat_result=stat_result)
+            raise
 
 
 def create_app(config: Config, static_dir: str | None = None) -> FastAPI:
@@ -175,7 +194,7 @@ def create_app(config: Config, static_dir: str | None = None) -> FastAPI:
         allow_credentials=True,
     )
     if static_dir and Path(static_dir).is_dir():
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+        app.mount("/", SPAStaticFiles(directory=static_dir, html=True), name="static")
     return app
 
 
