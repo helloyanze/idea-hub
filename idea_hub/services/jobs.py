@@ -7,6 +7,7 @@ from ..collectors import collect_all
 from ..errors import AppError, BAD_REQUEST
 from ..services.filtering import apply_keywords_filter, dedup_by_url, truncate_snapshot
 from ..services import generate
+from ..services import executor
 from ..services import settings as settings_service
 from ..services.notify import emit
 from ..services.scorer import score_items
@@ -324,6 +325,154 @@ def run_generate_job(job_id, payload, db_path, api_key, base_path=None) -> None:
                 "error",
                 entity_type="job",
                 entity_id=job_id,
+            )
+    finally:
+        if conn is not None:
+            conn.close()
+
+def add_tokens(job_id, tokens) -> int:
+    """实时累加 job 已消耗 token（供预算检查）。"""
+    conn = _open_registered_db()
+    try:
+        cursor = conn.execute(
+            "UPDATE jobs SET token_used = token_used + ?, "
+            "updated_at=datetime('now') WHERE id=? AND status='running'",
+            (int(tokens), job_id),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+def _today_token_used(conn) -> int:
+    """今日所有 job 累计消耗 token（含 collect/generate/execute）。"""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(token_used), 0) FROM jobs "
+        "WHERE date(created_at) = date('now')"
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def run_execute_job(job_id, payload, db_path, api_key, base_path=None) -> None:
+    """Execute a batch of tasks synchronously; callers may run it in a worker thread."""
+    if base_path is None:
+        from ..config import load as load_config
+
+        base_path = load_config().base_path
+    conn = None
+    try:
+        conn = db.connect(db_path)
+        mark_running(job_id)
+        heartbeat(job_id)
+        body = payload or {}
+        task_ids = list(body.get("task_ids") or [])
+        total = len(task_ids)
+        settings_map = settings_service.get_all(conn)
+        budget = int(settings_map.get("daily_budget_tokens") or 0)
+
+        # 启动时预算检查：今日已用（含其他 job）超限 → 直接 failed
+        today_used = _today_token_used(conn)
+        if today_used > budget:
+            finish(
+                job_id,
+                "failed",
+                error=f"daily token budget exceeded: used {today_used} / limit {budget}",
+            )
+            emit(
+                conn,
+                "budget_exceeded",
+                "今日 token 预算超限",
+                f"今日已用 {today_used} tokens，预算 {budget}，任务未开始",
+                "warn",
+                entity_type="job",
+                entity_id=job_id,
+            )
+            return
+
+        done_ids = []
+        failed_items = []
+        for index, task_id in enumerate(task_ids, start=1):
+            result = executor.execute_one(
+                conn, task_id, api_key,
+                heartbeat=lambda: heartbeat(job_id),
+                base_path=base_path,
+            )
+            if result.token_used:
+                add_tokens(job_id, result.token_used)
+            update_progress(job_id, int(index / total * 100) if total else 100)
+            heartbeat(job_id)
+            if result.conflict:
+                failed_items.append({
+                    "task_id": task_id,
+                    "error": result.error or "任务状态冲突：产物已写入但任务状态未修改",
+                    "conflict": True,
+                })
+            elif not result.ok:
+                failed_items.append({
+                    "task_id": task_id,
+                    "error": result.error or "执行失败",
+                    "conflict": False,
+                })
+            else:
+                done_ids.append(task_id)
+            # 实时预算检查：每任务完成后重新统计今日消耗
+            if _today_token_used(conn) > budget:
+                finish(
+                    job_id,
+                    "failed",
+                    result_ref=json.dumps(
+                        {"task_ids": task_ids, "done_ids": done_ids,
+                         "failed_items": failed_items},
+                        ensure_ascii=False,
+                    ),
+                    error=f"daily token budget exceeded after {index}/{total} tasks",
+                )
+                emit(
+                    conn,
+                    "budget_exceeded",
+                    "今日 token 预算超限",
+                    f"执行 {index} 个任务后超出预算，已停止后续任务",
+                    "warn",
+                    entity_type="job",
+                    entity_id=job_id,
+                )
+                return
+
+        update_progress(job_id, 100)
+        result_ref = json.dumps(
+            {"task_ids": task_ids, "failed_items": failed_items},
+            ensure_ascii=False,
+        )
+        failed_count = len(failed_items)
+        if failed_count == total:
+            finish(job_id, "failed", result_ref=result_ref,
+                   error=f"{failed_count}/{total} tasks failed")
+            emit(
+                conn, "job_failed", "执行任务失败",
+                f"{failed_count}/{total} 个任务执行失败",
+                "error", entity_type="job", entity_id=job_id,
+            )
+        elif failed_count:
+            finish(job_id, "done", result_ref=result_ref)
+            emit(
+                conn, "execute_done", "执行完成（部分失败）",
+                f"完成 {total - failed_count} 个，失败 {failed_count} 个",
+                "warn", entity_type="job", entity_id=job_id,
+            )
+        else:
+            finish(job_id, "done", result_ref=result_ref)
+            emit(
+                conn, "execute_done", "执行完成",
+                f"完成 {total} 个任务",
+                "info", entity_type="job", entity_id=job_id,
+            )
+    except Exception as exc:
+        finish(job_id, "failed", error=str(exc))
+        if conn is not None:
+            emit(
+                conn, "job_failed", "执行任务失败",
+                str(exc), "error", entity_type="job", entity_id=job_id,
             )
     finally:
         if conn is not None:

@@ -118,3 +118,51 @@ def chat_json(
     if last_error is not None:
         raise last_error
     raise RuntimeError("LLM JSON call did not execute")
+
+
+def chat_text(
+    messages: list[dict],
+    api_key: str,
+    timeout: float = 90,
+    max_retries: int = 2,
+    heartbeat: Callable[[], None] | None = None,
+    token_usage: dict | None = None,
+) -> str:
+    """调用 DeepSeek 并返回原始文本内容（用于正式内容生成）。"""
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY 未配置：生成任务需要 LLM key，无法降级执行")
+
+    last_error: Exception | None = None
+    total_attempts = max_retries + 1
+    for attempt in range(total_attempts):
+        try:
+            if heartbeat is not None:
+                heartbeat()
+            resp = httpx.post(
+                LLM_URL,
+                timeout=timeout,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": LLM_MODEL,
+                    "temperature": 0,
+                    "messages": messages,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if token_usage is not None:
+                usage = data.get("usage") or {}
+                token_usage["total"] = int(usage.get("total_tokens") or 0)
+            return data["choices"][0]["message"]["content"]
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "LLM text call failed (attempt %d/%d): %s",
+                attempt + 1,
+                total_attempts,
+                exc,
+            )
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("LLM text call did not execute")
