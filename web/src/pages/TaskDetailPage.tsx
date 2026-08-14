@@ -97,6 +97,7 @@ function TaskDetailPage() {
   const [isEditingTags, setIsEditingTags] = useState(false)
   const [tagInput, setTagInput] = useState("")
   const [actionError, setActionError] = useState<string | null>(null)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [isEditingInfo, setIsEditingInfo] = useState(false)
   const [infoForm, setInfoForm] = useState<InfoFormState>({
     title: "",
@@ -238,6 +239,7 @@ function TaskDetailPage() {
   }
 
   function handleActionError(error: Error) {
+    setActionMessage(null)
     setActionError(error.message)
   }
 
@@ -247,8 +249,9 @@ function TaskDetailPage() {
         method: "POST",
         body: JSON.stringify({ to_status: toStatus }),
       }),
-    onSuccess: () => {
+    onSuccess: (_data, toStatus) => {
       setActionError(null)
+      setActionMessage(`已移至${STATUS_LABELS[toStatus] ?? toStatus}`)
       invalidateTaskData()
     },
     onError: handleActionError,
@@ -259,6 +262,7 @@ function TaskDetailPage() {
       apiFetch(`/api/v1/tasks/${id}/redo`, { method: "POST" }),
     onSuccess: () => {
       setActionError(null)
+      setActionMessage("已重做，任务回到进行流程")
       invalidateTaskData()
     },
     onError: handleActionError,
@@ -269,6 +273,7 @@ function TaskDetailPage() {
       apiFetch(`/api/v1/tasks/${id}/reset-failures`, { method: "POST" }),
     onSuccess: () => {
       setActionError(null)
+      setActionMessage("已重置失败状态")
       invalidateTaskData()
     },
     onError: handleActionError,
@@ -649,34 +654,74 @@ function TaskDetailPage() {
 
       <section className="space-y-3 rounded-xl border p-4">
         <h3 className="font-semibold">状态操作</h3>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" onClick={() => moveMutation.mutate("todo")}>
-            移至待办
-          </Button>
-          <Button type="button" variant="outline" onClick={() => moveMutation.mutate("waiting")}>
-            移至等待中
-          </Button>
-          <Button type="button" variant="outline" onClick={() => moveMutation.mutate("in_progress")}>
-            移至进行中
-          </Button>
-          <Button type="button" variant="outline" onClick={() => moveMutation.mutate("done")}>
-            移至已完成
-          </Button>
-          <Button type="button" variant="secondary" onClick={() => redoMutation.mutate()}>
-            重做
-          </Button>
-          <Button type="button" variant="secondary" onClick={() => resetFailuresMutation.mutate()}>
-            重置失败
-          </Button>
-          <Button type="button" variant="destructive" onClick={() => deleteMutation.mutate()}>
-            删除
-          </Button>
-        </div>
+        {actionMessage ? (
+          <p data-testid="task-action-message" className="text-sm text-green-600">
+            {actionMessage}
+          </p>
+        ) : null}
         {actionError ? (
           <p data-testid="task-action-error" className="text-destructive">
             {actionError}
           </p>
         ) : null}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={moveMutation.isPending}
+            onClick={() => moveMutation.mutate("todo")}
+          >
+            {moveMutation.isPending ? "处理中..." : "移至待办"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={moveMutation.isPending}
+            onClick={() => moveMutation.mutate("waiting")}
+          >
+            {moveMutation.isPending ? "处理中..." : "移至等待中"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={moveMutation.isPending}
+            onClick={() => moveMutation.mutate("in_progress")}
+          >
+            {moveMutation.isPending ? "处理中..." : "移至进行中"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={moveMutation.isPending}
+            onClick={() => moveMutation.mutate("done")}
+          >
+            {moveMutation.isPending ? "处理中..." : "移至已完成"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={redoMutation.isPending}
+            onClick={() => redoMutation.mutate()}
+          >
+            {redoMutation.isPending ? "处理中..." : "重做"}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={resetFailuresMutation.isPending}
+            onClick={() => resetFailuresMutation.mutate()}
+          >
+            {resetFailuresMutation.isPending ? "处理中..." : "重置失败"}
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={deleteMutation.isPending}
+            onClick={() => deleteMutation.mutate()}
+          >
+            {deleteMutation.isPending ? "处理中..." : "删除"}
+          </Button>
+        </div>
       </section>
     </div>
   )
