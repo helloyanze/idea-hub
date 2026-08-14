@@ -125,7 +125,7 @@ def _parse_llm_array(raw):
     return data
 
 
-def _llm_score_batch(items, api_key, dimensions):
+def _llm_score_batch(items, api_key, dimensions, token_usage=None):
     """一次 DeepSeek 批量评分调用，返回 {index: {dim: score}}。失败抛异常由调用方重试。"""
     lines = "\n".join(
         f"{i + 1}. 标题：{it.title}\n   URL：{it.url}\n   摘要：{(it.content_snapshot or '')[:300]}"
@@ -151,7 +151,11 @@ def _llm_score_batch(items, api_key, dimensions):
                            {"role": "user", "content": user}]},
     )
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    if token_usage is not None:
+        usage = data.get("usage") or {}
+        token_usage["total"] = int(usage.get("total_tokens") or 0)
+    content = data["choices"][0]["message"]["content"]
     rows = _parse_llm_array(content)
     results = {}
     for i, it in enumerate(items):
@@ -164,7 +168,7 @@ def _llm_score_batch(items, api_key, dimensions):
     return results
 
 
-def score_items(items, api_key=None, dimensions=None, threshold=8):
+def score_items(items, api_key=None, dimensions=None, threshold=8, token_usage=None):
     """批量评分：规则过滤（0 token）→ LLM 批量评分 → 等权聚合 + 两档分流。
 
     无 api_key 或 LLM 调用失败 → 降级：全部 verdict=admit、评分字段为空。
@@ -192,7 +196,12 @@ def score_items(items, api_key=None, dimensions=None, threshold=8):
         last_err = None
         for attempt in range(LLM_MAX_RETRIES + 1):
             try:
-                results = _llm_score_batch(llm_items, api_key, dimensions)
+                results = _llm_score_batch(
+                    llm_items,
+                    api_key,
+                    dimensions,
+                    token_usage=token_usage,
+                )
                 break
             except Exception as exc:
                 last_err = exc

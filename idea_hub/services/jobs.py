@@ -5,8 +5,10 @@ import json
 from .. import db, models
 from ..collectors import collect_all
 from ..errors import AppError, BAD_REQUEST
-from ..services.notify import emit
 from ..services.filtering import apply_keywords_filter, dedup_by_url, truncate_snapshot
+from ..services import settings as settings_service
+from ..services.notify import emit
+from ..services.scorer import score_items
 
 
 _db_path: str | None = None
@@ -122,13 +124,18 @@ def dedup_running(conn, type) -> int | None:
     return row[0] if row is not None else None
 
 
-def run_collect_job(job_id, payload, db_path) -> None:
+def run_collect_job(job_id, payload, db_path, api_key=None) -> None:
     """Execute a collect job synchronously; callers may run it in a worker thread."""
     conn = None
     try:
         conn = db.connect(db_path)
         mark_running(job_id)
         heartbeat(job_id)
+        settings_map = settings_service.get_all(conn)
+        dimensions = settings_map.get("score_dimensions") or [
+            "facts", "verification", "timeliness", "value"
+        ]
+        threshold = settings_map.get("score_todo_threshold") or 8
         source_ids = (payload or {}).get("source_ids")
         rows = models.list_sources(conn, enabled_only=source_ids is None)
         if source_ids is not None:
@@ -137,6 +144,9 @@ def run_collect_job(job_id, payload, db_path) -> None:
 
         total = len(rows)
         inserted_total = 0
+        admit_total = 0
+        discard_total = 0
+        token_total = 0
         errors = []
         for index, row in enumerate(rows, start=1):
             try:
@@ -144,19 +154,39 @@ def run_collect_job(job_id, payload, db_path) -> None:
                 errors.extend(result["errors"])
                 items = apply_keywords_filter(result["items"], row["keywords"])
                 items = dedup_by_url(conn, items)
-                for item in items:
+                if items:
+                    usage = {}
+                    scored = score_items(
+                        items,
+                        api_key=api_key,
+                        dimensions=dimensions,
+                        threshold=threshold,
+                        token_usage=usage,
+                    )
+                    token_total += usage.get("total", 0)
+                else:
+                    scored = []
+                for item in scored:
                     cursor = conn.execute(
                         "INSERT OR IGNORE INTO hot_items "
-                        "(source_id, title, url, content_snapshot, verdict) "
-                        "VALUES (?, ?, ?, ?, 'admit')",
+                        "(source_id, title, url, content_snapshot, final_score, score_breakdown, verdict) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             item.source_id,
                             item.title,
                             item.url,
                             truncate_snapshot(item.content_snapshot),
+                            item.final_score if item.final_score is not None else 0,
+                            json.dumps(item.score_breakdown, ensure_ascii=False),
+                            item.verdict,
                         ),
                     )
-                    inserted_total += cursor.rowcount
+                    if cursor.rowcount:
+                        inserted_total += 1
+                        if item.verdict == "admit":
+                            admit_total += 1
+                        else:
+                            discard_total += 1
                 conn.commit()
             except Exception as exc:
                 errors.append({"source_id": row["id"], "error": str(exc)})
@@ -170,12 +200,19 @@ def run_collect_job(job_id, payload, db_path) -> None:
             {"hotspot_count": inserted_total, "errors": errors},
             ensure_ascii=False,
         )
-        if finish(job_id, "done", result_ref=result_ref):
+        if finish(job_id, "done", result_ref=result_ref, token_used=token_total):
+            if api_key:
+                body = (
+                    f"新增 {inserted_total} 条热点，来源 {total} 个"
+                    f"（收录 {admit_total} 条 / 丢弃 {discard_total} 条）"
+                )
+            else:
+                body = f"降级全收：新增 {inserted_total} 条热点，来源 {total} 个"
             emit(
                 conn,
                 "collect_done",
                 "热点收集完成",
-                f"新增 {inserted_total} 条热点，来源 {total} 个",
+                body,
                 "info",
                 entity_type="job",
                 entity_id=job_id,

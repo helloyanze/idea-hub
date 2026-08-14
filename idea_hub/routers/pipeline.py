@@ -37,6 +37,7 @@ async def collect(request: Request, body: CollectIn | None = None):
             job_id,
             payload,
             config.db_path,
+            config.deepseek_api_key,
         )
     )
     _background_tasks.add(task)
