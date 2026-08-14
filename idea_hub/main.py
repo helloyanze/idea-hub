@@ -1,7 +1,7 @@
 """FastAPI application factory for Idea Hub."""
 
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import secrets
 import time
 from typing import Deque
@@ -57,7 +57,7 @@ def scheduler_status(last_tick: datetime | None) -> tuple[str, datetime | None]:
     now = datetime.now(last_tick.tzinfo) if last_tick.tzinfo else datetime.now()
     if now - last_tick > timedelta(minutes=10):
         return ("unhealthy", last_tick)
-    return ("ok", last_tick)
+    return ("running", last_tick)
 
 
 def create_app(config: Config) -> FastAPI:
@@ -120,15 +120,27 @@ def create_app(config: Config) -> FastAPI:
     def health():
         db_status = "ok"
         connection = None
+        last_tick_value = None
         try:
             connection = db.connect(config.db_path)
             connection.execute("SELECT 1").fetchone()
         except Exception:
             db_status = "error"
+        try:
+            if connection is not None:
+                row = connection.execute(
+                    "SELECT value FROM settings WHERE key = 'scheduler_last_tick'"
+                ).fetchone()
+                if row is not None and row[0]:
+                    last_tick_value = datetime.strptime(
+                        row[0], "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=timezone.utc)
+        except Exception:
+            last_tick_value = None
         finally:
             if connection is not None:
                 connection.close()
-        scheduler_state, last_tick = scheduler_status(None)
+        scheduler_state, last_tick = scheduler_status(last_tick_value)
         return {
             "data": {
                 "status": "ok",
