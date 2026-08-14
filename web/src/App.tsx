@@ -16,7 +16,9 @@ import {
   subscribeCredentials,
 } from "@/lib/auth";
 import { ThemeProvider } from "@/lib/theme";
+import { KanbanPage } from "@/pages/KanbanPage";
 import { SourcesPage } from "@/pages/SourcesPage";
+import { TaskDetailPage } from "@/pages/TaskDetailPage";
 import { UnderConstruction } from "@/pages/UnderConstruction";
 
 const queryClient = new QueryClient();
@@ -78,10 +80,7 @@ function Shell() {
         <main className="min-w-0 flex-1">
           <Routes>
             <Route path="/" element={<Navigate replace to="/kanban" />} />
-            <Route
-              path="/kanban"
-              element={<UnderConstruction description="看板页面将在后续任务中实现" />}
-            />
+            <Route path="/kanban" element={<KanbanPage />} />
             <Route
               path="/hotspots"
               element={<UnderConstruction description="热点页面将在后续任务中实现" />}
@@ -98,10 +97,7 @@ function Shell() {
               path="/stats"
               element={<UnderConstruction description="统计页面将在后续任务中实现" />}
             />
-            <Route
-              path="/tasks/:id"
-              element={<UnderConstruction description="任务详情将在后续任务中实现" />}
-            />
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
           </Routes>
         </main>
       </div>
