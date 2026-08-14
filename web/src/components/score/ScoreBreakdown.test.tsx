@@ -14,25 +14,25 @@ describe("ScoreBadge", () => {
     expect(badge.className).not.toContain("red");
   });
 
-  it("renders yellow for score 6-7", () => {
+  it("renders blue for score 6-7", () => {
     const { rerender } = render(<ScoreBadge score={7} />);
     const badge7 = screen.getByTestId("score-badge");
-    expect(badge7.className).toContain("yellow");
+    expect(badge7.className).toContain("blue");
     expect(badge7.className).not.toContain("green");
 
     rerender(<ScoreBadge score={6} />);
     const badge6 = screen.getByTestId("score-badge");
-    expect(badge6.className).toContain("yellow");
-    expect(badge6.className).not.toContain("red");
+    expect(badge6.className).toContain("blue");
+    expect(badge6.className).not.toContain("gray");
   });
 
-  it("renders red for score < 6", () => {
+  it("renders gray for score < 6", () => {
     render(<ScoreBadge score={5} />);
     const badge = screen.getByTestId("score-badge");
     expect(badge).toHaveTextContent("5");
-    expect(badge.className).toContain("red");
+    expect(badge.className).toContain("gray");
     expect(badge.className).not.toContain("green");
-    expect(badge.className).not.toContain("yellow");
+    expect(badge.className).not.toContain("blue");
   });
 });
 

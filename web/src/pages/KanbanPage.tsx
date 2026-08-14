@@ -103,6 +103,7 @@ function KanbanPage() {
     { ...COLUMNS[2], items: inProgressItems },
     { ...COLUMNS[3], items: doneItems },
   ]
+  const totalCount = columnData.reduce((sum, column) => sum + column.items.length, 0)
 
   const moveMutation = useMutation({
     mutationFn: ({ id, toStatus }: MoveVariables) =>
@@ -152,7 +153,12 @@ function KanbanPage() {
   return (
     <div className="space-y-4 p-4 md:p-6">
       <div className="space-y-2">
-        <h2 className="text-xl font-semibold">任务看板</h2>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="text-xl font-semibold">任务看板</h2>
+          <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+            共 {totalCount} 个任务
+          </span>
+        </div>
         {q ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <span>搜索：{q}</span>
@@ -173,7 +179,7 @@ function KanbanPage() {
       </div>
 
       <DndContext onDragEnd={handleDragEnd}>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 lg:gap-5 xl:grid-cols-4 xl:gap-6">
           {columnData.map((column) => (
             <KanbanColumn
               key={column.status}
