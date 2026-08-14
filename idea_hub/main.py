@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import time
 from typing import Deque
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -64,7 +66,7 @@ def scheduler_status(last_tick: datetime | None) -> tuple[str, datetime | None]:
     return ("running", last_tick)
 
 
-def create_app(config: Config) -> FastAPI:
+def create_app(config: Config, static_dir: str | None = None) -> FastAPI:
     """Create and configure the Idea Hub FastAPI application."""
     app = FastAPI()
     app.state.config = config
@@ -172,8 +174,15 @@ def create_app(config: Config) -> FastAPI:
         allow_headers=["*"],
         allow_credentials=True,
     )
+    if static_dir and Path(static_dir).is_dir():
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
     return app
 
 
+def _default_static_dir() -> str | None:
+    dist = Path(__file__).resolve().parent.parent / "web" / "dist"
+    return str(dist) if dist.is_dir() else None
+
+
 # Uvicorn entry point using default config for local development (auth off).
-app = create_app(load())
+app = create_app(load(), static_dir=_default_static_dir())

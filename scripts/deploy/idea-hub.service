@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=$HOME/idea-hub
-ExecStart=$HOME/idea-hub/.venv/bin/uvicorn idea_hub.server:app --host 127.0.0.1 --port 8000
+ExecStart=$HOME/idea-hub/.venv/bin/uvicorn idea_hub.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

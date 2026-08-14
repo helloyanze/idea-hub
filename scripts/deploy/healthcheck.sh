@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# 调度器健康监控：每 15 分钟 cron 运行。last_scheduler_tick 超 15 分钟未更新则 QQ 告警。
+# 调度器健康监控：每 15 分钟 cron 运行。scheduler_last_tick 超 15 分钟未更新则 QQ 告警。
 set -euo pipefail
 cd "$HOME/idea-hub"
 LAST=$(.venv/bin/python -c "
 from idea_hub import db
 c = db.connect('data/idea.db')
-print(c.execute(\"SELECT value FROM settings WHERE key='last_scheduler_tick'\").fetchone()[0])
+print(c.execute(\"SELECT value FROM settings WHERE key='scheduler_last_tick'\").fetchone()[0])
 c.close()")
 if [ -z "$LAST" ]; then exit 0; fi
 MIN=$(.venv/bin/python -c "
 from datetime import datetime
 from idea_hub import db
 c = db.connect('data/idea.db')
-ts = c.execute(\"SELECT value FROM settings WHERE key='last_scheduler_tick'\").fetchone()[0]
+ts = c.execute(\"SELECT value FROM settings WHERE key='scheduler_last_tick'\").fetchone()[0]
 c.close()
 try:
     last = datetime.fromisoformat(ts)

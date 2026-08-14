@@ -1,181 +1,254 @@
-# Idea Hub 云端部署指南（方案 A：云端全自动）
+# Idea Hub v2 云端部署指南
 
-将 Idea Hub + Hermes 部署到云服务器，每晚自动完成"收集热点 → 生成 idea → 执行等待队列"，数据同步回本地查看。
+本文档适用于 Idea Hub v2。所有常规命令均为 v2 命令；第八节出现的旧命令仅用于识别并替换已废弃的 v1 配置。
 
-## 架构
+## 1. 架构
 
-```
-┌───────────────────── 云服务器 ─────────────────────┐
-│  Hermes Agent（LLM 能力）                           │
-│    ├─ 每晚 02:00 cron: collect → 生成 idea（AI）    │
-│    └─ 每晚 03:00 cron: 执行等待队列（AI 产出内容）   │
-│  Idea Hub（uvicorn :8000，仅 127.0.0.1 监听）       │
-│  data/idea.db + outputs/（唯一数据源）              │
-└─────────────────────┬──────────────────────────────┘
-                      │ SSH 隧道（远程操作 Web）
-                      │ scp 每晚同步（数据备份/离线查看）
-┌─────────────────────▼──────────────────────────────┐
-│  本地 Windows                                        │
-│    - 浏览器 http://127.0.0.1:8000 操作云端 Web      │
-│    - 每晚拉取 data/idea.db + outputs/ 到本地备份    │
-└────────────────────────────────────────────────────┘
-```
+云端运行一套用户级部署：
 
-## 一、服务器准备（一次性）
+- uvicorn 启动 idea_hub.main:app，后端同源托管前端构建产物 web/dist。
+- v2 crontab 每 5 分钟唤醒 tick；每天 03:00 执行在线备份。
+- data/idea.db 与仓库根目录 outputs/ 是唯一运行数据源。
+- backups/ 保存压缩备份，logs/ 保存服务、调度器、备份和健康检查日志。
 
-1. 一台 Linux 云服务器（推荐 Ubuntu 22.04+，2C2G 即可，费用约 30-60 元/月）
-2. 开放 SSH（22 端口）；Web 端口不需要公网开放（走 SSH 隧道访问，更安全）
+确认仓库目录：
 
-## 二、上传代码与初始化
+~~~bash
+cd ~/idea-hub
+pwd
+~~~
 
-> **国内服务器注意**：以下步骤前先在服务器配置国内镜像，否则 GitHub/PyPI 下载会超时：
-> ```bash
-> # git 走 GitHub 加速代理
-> git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
-> git config --global url."https://ghfast.top/https://raw.githubusercontent.com/".insteadOf "https://raw.githubusercontent.com/"
-> # uv 走国内镜像（PyPI + Python 下载）
-> mkdir -p ~/.config/uv && cat > ~/.config/uv/uv.toml <<'EOF'
-> python_install_mirror = "https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download"
-> default-index = "https://pypi.tuna.tsinghua.edu.cn/simple"
-> EOF
-> # Node.js 走 npmmirror（Hermes 安装需要 Node 22，提前装好可跳过 nodejs.org 下载）
-> cd /tmp && curl -fsSL -o node.tar.xz "https://npmmirror.com/mirrors/node/v22.23.2/node-v22.23.2-linux-x64.tar.xz" \
->   && mkdir -p ~/.local/node && tar -xJf node.tar.xz -C ~/.local/node --strip-components=1 \
->   && echo 'export PATH=$HOME/.local/node/bin:$PATH' >> ~/.bashrc
-> ```
+## 2. 前置依赖
 
-```bash
-# 本地执行：上传项目代码（排除 .venv/data/outputs）
-cd /d/Programs/idea-hub
-scp -r idea_hub web scripts requirements.txt pytest.ini README.md \
-    ubuntu@<服务器IP>:/tmp/idea-hub-upload/
-ssh ubuntu@<服务器IP> "sudo mkdir -p $HOME/idea-hub && sudo chown -R ubuntu:ubuntu $HOME/idea-hub && cp -r /tmp/idea-hub-upload/* $HOME/idea-hub/"
+需要 Python 3.11+、uv、Node.js 22+ 和 pnpm。pnpm 仅用于前端构建，但建议在部署前安装。
 
-# 服务器执行：初始化环境（Python/uv/venv/依赖/Hermes）
-ssh ubuntu@<服务器IP> "cd $HOME/idea-hub && bash scripts/deploy/install-server.sh $HOME/idea-hub"
-```
+~~~bash
+python3 --version
+curl --version
+git --version
+node --version
+pnpm --version
+uv --version
+~~~
 
-## 三、配置 Hermes（服务器上执行一次）
+若尚未安装 uv，使用用户级安装，不需要 sudo：
 
-```bash
-ssh ubuntu@<服务器IP>
-cd $HOME/idea-hub
-hermes setup        # 交互式选择 provider（如 DeepSeek）并填入 API key
-# 或非交互（注意：必须同时设置 default、base_url，否则可能误走 OpenRouter）：
-hermes config set model.provider deepseek
-hermes config set model.default deepseek-chat
-hermes config set model.model deepseek-chat
-hermes config set model.base_url https://api.deepseek.com
-# 在 ~/.hermes/.env 写入 DEEPSEEK_API_KEY=sk-xxx（chmod 600）
-```
+~~~bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv --version
+~~~
 
-验证：`hermes chat -q "回复数字 42 即可"` —— 应看到回复 "42"。
-若报 `HTTP 401 Missing Authentication header` 且 Endpoint 是 openrouter.ai：说明 `model.default`/`base_url` 配置错误（见上方四行配置），
-必须显式设置 `model.default=deepseek-chat` 和 `model.base_url=https://api.deepseek.com`。
+## 3. 上传与初始化
 
-## 四、初始化数据（服务器上执行一次）
+在本地项目根目录执行上传（将 <user> 和 <server> 替换为云服务器账号与地址）：
 
-先启动 Web 服务（见第五节），然后在服务器本机用 API 初始化：
+~~~bash
+scp -r idea_hub web scripts requirements.txt pytest.ini README.md <user>@<server>:~/idea-hub/
+~~~
 
-```bash
-# 创建目标模式（自媒体内容类）——score_dimensions 为 JSON 字符串
-curl -s -X POST http://127.0.0.1:8000/api/targets \
-    -H "Content-Type: application/json" \
-    -d '{"name":"自媒体内容","description":"生成自媒体内容 idea","score_dimensions":"{\"热度\":0.4,\"相关性\":0.3,\"可执行性\":0.3}"}'
-# 激活该目标（返回的 id 假设为 1）
-curl -s -X POST http://127.0.0.1:8000/api/targets/1/activate
-# 添加来源（热榜 API：url 指向返回 JSON 的接口）
-curl -s -X POST http://127.0.0.1:8000/api/sources \
-    -H "Content-Type: application/json" \
-    -d '{"type":"hotlist","name":"示例热榜","url":"https://api.example.com/hot"}'
-# 百度热搜（实测可用，需自定义 items_path/title_field）：
-curl -s -X POST http://127.0.0.1:8000/api/sources \
-    -H "Content-Type: application/json" \
-    -d '{"type":"hotlist","name":"百度热搜","url":"https://top.baidu.com/api/board?platform=wise&tab=realtime","items_path":"data.cards.0.content.0.content","title_field":"word"}'
-# 添加 RSS 来源
-curl -s -X POST http://127.0.0.1:8000/api/sources \
-    -H "Content-Type: application/json" \
-    -d '{"type":"rss","name":"示例RSS","url":"https://example.com/feed.xml"}'
-# 测试收集
-uv run python -m idea_hub.cli --db data/idea.db collect
-```
+登录云服务器后运行一键初始化脚本：
 
-> 说明：也可以通过 Web 界面（SSH 隧道后打开 http://127.0.0.1:8000 → 来源管理弹窗）添加来源；
-> 目标模式切换在界面顶部下拉完成。
+~~~bash
+cd ~/idea-hub
+bash scripts/deploy/install-server.sh
+~~~
 
-## 五、安装服务与定时任务
+脚本会完成用户级 uv venv、依赖安装、data/、outputs/、backups/、logs/、prompts/ 目录创建、config.yaml 生成、前端 pnpm build（可选）以及 v2 crontab 安装。
 
-```bash
-# Web 服务常驻（systemd）
-sudo cp scripts/deploy/idea-hub.service /etc/systemd/system/
-sudo sed -i 's/^User=ubuntu/User='"$USER"'/' /etc/systemd/system/idea-hub.service
+## 4. 配置
+
+config.yaml 的关键字段如下：
+
+~~~yaml
+db_path: data/idea.db
+base_path: /home/<user>/idea-hub
+host: 127.0.0.1
+port: 8000
+auth_user: admin
+auth_pass: <随机密码>
+deepseek_api_key: ""
+~~~
+
+配置优先级为配置文件后由环境变量覆盖。config.py 的 environment_overrides 映射包括：
+
+~~~bash
+export DEEPSEEK_API_KEY="sk-..."
+export IDEAHUB_AUTH_USER="admin"
+export IDEAHUB_AUTH_PASS="change-this-password"
+~~~
+
+如果 config.yaml 不存在，应用使用默认配置，HTTP Basic 认证默认关闭；生产环境应运行初始化脚本生成配置，或手动创建配置并设置认证信息。API key 只通过环境变量或服务器上的配置注入。
+
+## 5. 启动与健康检查
+
+手动启动同源 Web 服务：
+
+~~~bash
+cd ~/idea-hub
+nohup uv run uvicorn idea_hub.main:app --host 127.0.0.1 --port 8000 >> logs/server.log 2>&1 &
+~~~
+
+如果服务器已有 idea-hub.service，可使用现有 systemd unit 管理服务；确认 unit 内容指向 v2 的 idea_hub.main:app 后执行：
+
+~~~bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now idea-hub
+sudo systemctl enable --now idea-hub.service
+sudo systemctl status idea-hub.service
+~~~
 
-# 每晚任务（crontab）
-mkdir -p logs prompts
-cp scripts/deploy/prompts/*.txt prompts/
+检查 API 健康状态：
+
+~~~bash
+curl -i http://127.0.0.1:8000/api/v1/health
+~~~
+
+若配置了认证，使用账号密码检查：
+
+~~~bash
+curl -i -u admin:'<auth_pass>' http://127.0.0.1:8000/api/v1/health
+~~~
+
+访问 / 时，若 web/dist 存在，FastAPI 会同源返回前端 index.html；不存在时 API 仍可运行。
+
+## 6. crontab 安装与说明
+
+安装仓库提供的 v2 配方：
+
+~~~bash
+cd ~/idea-hub
 crontab -l > /tmp/cron.bak 2>/dev/null || true
 cat scripts/deploy/crontab.txt >> /tmp/cron.bak
 crontab /tmp/cron.bak
-crontab -l   # 确认
-```
+crontab -l
+~~~
 
-## 六、本地访问与同步
+v2 调度安排：
 
-### 远程操作 Web（SSH 隧道）
+- 每 5 分钟执行 uv run python -m idea_hub.cli tick。
+- collect 的实际触发频率由数据库 settings.collect_interval_hours 动态控制。
+- 每日 03:00 执行 scripts/deploy/backup.sh，保留最近 7 份压缩备份。
+- @reboot 使用 uv run uvicorn idea_hub.main:app 自启 Web 服务。
+- 每 15 分钟运行 scripts/deploy/healthcheck.sh，检查 scheduler_last_tick。
 
-```bat
-REM Windows：双击或命令行运行
-scripts\sync\tunnel.cmd ubuntu 服务器IP
-REM 然后浏览器打开 http://127.0.0.1:8000
-```
+v2 不再需要 v1 的 collect、generate、execute 定时命令；任务由 tick 与 Web API 驱动。
 
-或手动：`ssh -N -L 8000:127.0.0.1:8000 ubuntu@<服务器IP>`
+## 7. 备份与恢复
 
-### 每晚同步数据到本地
+手动执行备份：
 
-```bash
-# git-bash 手动同步
-bash scripts/sync/sync-from-server.sh ubuntu@<服务器IP> ~/idea-hub-backup
-```
+~~~bash
+cd ~/idea-hub
+bash scripts/deploy/backup.sh
+ls -lh backups/idea-backup-*.tar.gz
+~~~
 
-**配置 Windows 计划任务自动同步：**
+脚本产出 backups/idea-backup-<时间戳>.tar.gz，包内含 idea.db 与 outputs/。备份使用 SQLite db.backup 在线备份 API，因此包含尚未 checkpoint 的 WAL 数据。
 
-1. 打开"任务计划程序" → 创建基本任务
-2. 触发器：每天 08:00（或你起床时间）
-3. 操作：启动程序 → 程序 `C:\Program Files\Git\bin\bash.exe`，参数 `-lc "/d/Programs/idea-hub/scripts/sync/sync-from-server.sh ubuntu@<服务器IP> ~/idea-hub-backup"`
-4. 完成。每天自动把云端 data + outputs 拉到本地 `~/idea-hub-backup/`
+恢复前停止 Web 服务和调度任务，然后解包到临时目录：
 
-> 首次运行 scp 会要求输入密码；如需免密，配置 SSH 密钥：
-> `ssh-keygen`（本地）→ `ssh-copy-id ubuntu@<服务器IP>`（或手动把公钥加到服务器 ~/.ssh/authorized_keys）
+~~~bash
+cd ~/idea-hub
+mkdir -p /tmp/idea-hub-restore
+tar -xzf backups/idea-backup-<时间戳>.tar.gz -C /tmp/idea-hub-restore
+~~~
 
-### 离线查看
+覆盖数据库并恢复输出目录：
 
-同步完成后，可在本地启动只读查看：
-```bash
-cd ~/idea-hub-backup && python -m http.server 8080  # 仅查看 outputs 文件
-```
-（完整 Web 界面在云端，本地数据仅供备份与文件级查看）
+~~~bash
+cp /tmp/idea-hub-restore/idea.db data/idea.db
+rm -rf outputs
+cp -r /tmp/idea-hub-restore/outputs outputs
+rm -rf /tmp/idea-hub-restore
+~~~
 
-## 七、每晚自动运行的完整流程
+恢复完成后重新启动服务，并用健康检查确认数据库可读。
 
-| 时间 | 任务 | 说明 |
-|---|---|---|
-| 02:00 | collect + generate | 抓热点 → AI 生成 idea（评分入列：>=6 待办 / <6 留档）→ 关联热点重评分 |
-| 03:00 | execute | AI 领取等待队列任务 → 产出文章到 outputs/tasks/<id>/output.md |
-| 03:30 | backup | 数据库备份（保留 7 份） |
-| 08:00（本地） | 本地同步 | scp 拉取 data + outputs 到本地备份目录 |
+## 8. 云端切换注意（v1 -> v2，Important）
 
-## 八、运维
+旧配置切换时，不要手工逐条编辑。先备份旧 crontab，再用本仓库的 v2 文件整体替换：
 
-- 日志：`$HOME/idea-hub/logs/{collect,generate,execute,backup}.log`
-- Web 服务状态：`sudo systemctl status idea-hub`；重启：`sudo systemctl restart idea-hub`
-- 手动触发一次收集：`ssh ubuntu@<服务器IP> "cd $HOME/idea-hub && uv run python -m idea_hub.cli --db data/idea.db collect"`
-- 手动触发一次执行：`ssh ubuntu@<服务器IP> "cd $HOME/idea-hub && hermes chat -q \"\$(cat prompts/execute.txt)\""`
+~~~bash
+cd ~/idea-hub
+crontab -l > /tmp/cron.bak 2>/dev/null || true
+crontab scripts/deploy/crontab.txt
+crontab -l
+~~~
 
-## 安全说明
+以下仅是 v1 已废弃的旧引用，用来识别需要删除的旧 crontab 行，不要执行：
 
-- Web 只监听 127.0.0.1，不直接暴露公网；访问一律走 SSH 隧道
-- API key 只存在服务器 ~/.hermes/.env，不进入代码仓库
-- 数据同步走 scp（SSH 加密）
+- v1 已废弃：idea_hub.server:app
+- v1 已废弃：python -m idea_hub.scheduler --db data/idea.db
+- v1 已废弃：db.backup_db
+- v1 已废弃：旧 healthcheck 键 last_scheduler_tick
+
+切换后应只保留 scripts/deploy/crontab.txt 中的 v2 配方；健康检查键已改为 scheduler_last_tick。
+
+## 9. hermes verify 配方修正
+
+.hermes/environment.json 的启动命令已从 v1 已废弃的 idea_hub.server:app 改为 v2 的 idea_hub.main:app：
+
+~~~bash
+cat .hermes/environment.json
+~~~
+
+verify 使用：
+
+~~~bash
+uv pip install -r requirements.txt
+uv run uvicorn idea_hub.main:app --host 127.0.0.1 --port 8000
+~~~
+
+readinessPath 为 /；当 web/dist 存在时，静态服务返回 index.html，readiness 响应为 HTTP 200。
+
+## 10. 运维
+
+日志位置：
+
+~~~bash
+cd ~/idea-hub
+ls -lh logs/tick.log logs/backup.log logs/server.log logs/healthcheck.log
+~~~
+
+手动触发一次调度 tick：
+
+~~~bash
+uv run python -m idea_hub.cli tick
+~~~
+
+手动执行备份：
+
+~~~bash
+bash scripts/deploy/backup.sh
+~~~
+
+通过 Web API 手动触发执行任务：
+
+~~~bash
+curl -X POST http://127.0.0.1:8000/api/v1/execute -H 'Content-Type: application/json' -d '{}'
+~~~
+
+若启用认证，在 curl 中增加 -u admin:'<auth_pass>'。本地通过 SSH 隧道访问云端 Web：
+
+~~~bash
+ssh -N -L 8000:127.0.0.1:8000 <user>@<server>
+~~~
+
+然后在本地浏览器打开 http://127.0.0.1:8000。
+
+## 11. 安全说明
+
+- Uvicorn 仅监听 127.0.0.1，公网访问通过 SSH 隧道或受控反向代理。
+- DEEPSEEK_API_KEY 等 API key 只存环境变量或服务器上的 config.yaml，不提交到代码仓库。
+- config.yaml 含认证密码，应限制文件权限：
+
+~~~bash
+chmod 600 config.yaml
+~~~
+
+- 备份包包含数据库和输出内容，也应限制访问权限：
+
+~~~bash
+chmod 700 backups
+chmod 600 backups/idea-backup-*.tar.gz
+~~~

@@ -1,21 +1,15 @@
-# Idea Hub 云端 crontab（用户级，免 sudo）
-# mihomo 代理自启
-@reboot nohup $HOME/.config/mihomo/mihomo -d $HOME/.config/mihomo -f sub.yaml > $HOME/.config/mihomo/mihomo.log 2>&1 &
+# Idea Hub v2 crontab（用户级，免 sudo）
+# 调度器：每 5 分钟唤醒 tick；collect 触发频率由 settings.collect_interval_hours 动态控制
+*/5 * * * * cd $HOME/idea-hub && uv run python -m idea_hub.cli tick >> logs/tick.log 2>&1
 
-# Idea Hub Web 服务自启（加载 .env 认证变量）
-@reboot cd $HOME/idea-hub && bash -c 'set -a; source .env; set +a; nohup .venv/bin/uvicorn idea_hub.server:app --host 127.0.0.1 --port 8000 > logs/server.log 2>&1 &'
+# 每日备份：SQLite online backup（db.backup API）+ outputs 打包，保留 7 份
+0 3 * * * cd $HOME/idea-hub && bash scripts/deploy/backup.sh >> logs/backup.log 2>&1
 
-# Cloudflare Tunnel 自启（公网访问 idea.example.com）
-@reboot export PATH=$HOME/.local/bin:$PATH; nohup cloudflared tunnel --config $HOME/.cloudflared/config.yml run idea-hub > $HOME/.cloudflared/tunnel.log 2>&1 &
+# Web 服务自启（idea_hub.main:app 同源静态服务 web/dist）
+@reboot cd $HOME/idea-hub && nohup uv run uvicorn idea_hub.main:app --host 127.0.0.1 --port 8000 >> logs/server.log 2>&1 &
 
-# 每晚 02:00 收集热点并生成 idea（auto_run=0 时跳过）
-0 2 * * * cd $HOME/idea-hub && .venv/bin/python -c "from idea_hub import db,models; import sys; c=db.connect('data/idea.db'); sys.exit(0 if models.get_setting(c,'auto_run','1')=='1' else 1)" >/dev/null 2>&1 && export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 && $HOME/.local/bin/uv run python -m idea_hub.cli --db data/idea.db collect >> logs/collect.log 2>&1 && $HOME/.local/bin/hermes chat -q "$(cat $HOME/idea-hub/prompts/generate.txt)" >> logs/generate.log 2>&1 || echo "auto_run 暂停或收集失败，跳过 $(date)" >> logs/auto-run.log
-
-# 调度器：每 5 分钟检查等待队列并分发执行（auto_execute=0 时跳过自动领取）
-*/5 * * * * cd $HOME/idea-hub && export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 && $HOME/.local/bin/uv run python -m idea_hub.scheduler --db data/idea.db >> logs/scheduler.log 2>&1
-
-# 调度器健康监控：每 15 分钟检查 last_scheduler_tick
+# 调度器健康监控：每 15 分钟检查 scheduler_last_tick
 */15 * * * * cd $HOME/idea-hub && bash scripts/deploy/healthcheck.sh >> logs/healthcheck.log 2>&1
 
-# 每晚 03:30 备份数据库（保留最近 7 份）
-30 3 * * * cd $HOME/idea-hub && $HOME/.local/bin/uv run python -c "from idea_hub import db; c=db.connect('data/idea.db'); db.backup_db(c,'backups'); c.close()" >> logs/backup.log 2>&1
+# 前端构建（部署前手动执行一次，产物 web/dist 由后端同源服务）
+# cd $HOME/idea-hub/web && pnpm install && pnpm build
