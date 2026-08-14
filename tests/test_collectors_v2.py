@@ -15,6 +15,8 @@ from idea_hub.collectors import collect_all, collector_registry
 from idea_hub.collectors.base import BaseCollector, RawItem
 from idea_hub.collectors.github import GithubTrendingCollector
 from idea_hub.collectors.hackernews import HackerNewsCollector
+from idea_hub.collectors.baidu import BaiduHotlistCollector
+from idea_hub.collectors.bilibili import BilibiliHotlistCollector
 from idea_hub.collectors.hotlist import HotlistCollector, _dig
 from idea_hub.collectors.rss import RssCollector
 
@@ -109,7 +111,7 @@ def _src(src_id, src_type, url, **overrides):
 def test_hotlist_parse(monkeypatch):
     import requests
     monkeypatch.setattr(requests, "get",
-                        lambda url, timeout=15: FakeResponse(payload=BAIDU_SAMPLE))
+                        lambda url, timeout=15, headers=None: FakeResponse(payload=BAIDU_SAMPLE))
     src = _src(7, "hotlist", "https://top.baidu.com/api/board?platform=wise&tab=realtime",
                items_path="data.cards.0.content.0.content", title_field="word")
     items = HotlistCollector(src).fetch()
@@ -175,6 +177,7 @@ def test_collector_registry_maps_all_source_types():
     assert set(collector_registry) == {
         "hotlist", "rss", "github-trending", "hackernews",
         "zhihu-hotlist", "weibo-hotlist", "v2ex",
+        "baidu-hotlist", "bilibili-hotlist",
     }
     for cls in collector_registry.values():
         assert issubclass(cls, BaseCollector)
@@ -213,7 +216,7 @@ def test_orchestrator_limit_per_source(conn, monkeypatch):
         "'data.cards.0.content.0.content', 'word')")
     conn.commit()
     monkeypatch.setattr(requests, "get",
-                        lambda url, timeout=15: FakeResponse(payload=BAIDU_SAMPLE))
+                        lambda url, timeout=15, headers=None: FakeResponse(payload=BAIDU_SAMPLE))
     result = collect_all(conn, limit_per_source=1)
     assert len(result["items"]) == 1
     assert result["items"][0].title == "城市不仅要有高度 更要有温度"
@@ -252,3 +255,145 @@ def test_dig_missing_path():
 
 def test_dig_wildcard_at_end():
     assert _dig({"data": [1, 2, 3]}, "data[]") == [1, 2, 3]
+
+
+BILIBILI_SAMPLE = {
+    "code": 0,
+    "data": {
+        "list": [
+            {
+                "bvid": "BV1FRgn6pEph",
+                "title": "测试视频一号",
+                "desc": "简介文字",
+            },
+            {
+                "bvid": "BV1xx411c7mD",
+                "title": "测试视频二号",
+                "desc": "",
+            },
+            {"bvid": "", "title": "缺 bvid 应跳过"},
+        ]
+    },
+}
+
+
+# ---------- _dig 两级通配展平 ----------
+
+def test_dig_two_level_wildcard_flatten():
+    result = _dig(BAIDU_SAMPLE, "data.cards[].content[].content")
+    assert len(result) == 2
+    assert result[0]["word"] == "城市不仅要有高度 更要有温度"
+    assert result[1]["word"] == "油价将迎来年内第五次下调"
+
+
+def test_dig_two_level_wildcard_multi_card():
+    data = {
+        "data": {
+            "cards": [
+                {"content": [{"content": [{"word": "a"}, {"word": "b"}]}]},
+                {"content": [{"content": [{"word": "c"}, {"word": "d"}]}]},
+            ]
+        }
+    }
+    result = _dig(data, "data.cards[].content[].content")
+    assert [r["word"] for r in result] == ["a", "b", "c", "d"]
+
+
+def test_dig_mixed_single_level_and_two_level():
+    result = _dig(BAIDU_SAMPLE, "data.cards[].content[0].content")
+    assert len(result) == 2
+    result2 = _dig(BAIDU_SAMPLE, "data.cards[0].content[].content")
+    assert len(result2) == 2
+
+
+# ---------- baidu-hotlist ----------
+
+def test_baidu_hotlist_parse(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get",
+                        lambda url, timeout=15, headers=None: FakeResponse(payload=BAIDU_SAMPLE))
+    src = _src(20, "baidu-hotlist",
+               "https://top.baidu.com/api/board?platform=wise&tab=realtime",
+               items_path="data.cards[].content[].content", title_field="word")
+    items = BaiduHotlistCollector(src).fetch()
+    assert len(items) == 2
+    assert items[0].title == "城市不仅要有高度 更要有温度"
+    assert items[0].url == "https://m.baidu.com/s?word=A"
+    assert all(i.source_id == 20 for i in items)
+
+
+def test_baidu_hotlist_custom_headers(monkeypatch):
+    import requests
+    captured = {}
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers")
+        return FakeResponse(payload=BAIDU_SAMPLE)
+    monkeypatch.setattr(requests, "get", fake_get)
+    src = _src(20, "baidu-hotlist", "http://baidu.example/api",
+               items_path="data.cards[].content[].content", title_field="word",
+               channel_config='{"headers": {"Cookie": "BAIDUID=abc123"}}')
+    items = BaiduHotlistCollector(src).fetch()
+    assert len(items) == 2
+    assert captured["headers"]["Cookie"] == "BAIDUID=abc123"
+    assert "User-Agent" in captured["headers"]
+
+
+# ---------- bilibili-hotlist ----------
+
+def test_bilibili_hotlist_parse(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get",
+                        lambda url, timeout=15, headers=None: FakeResponse(payload=BILIBILI_SAMPLE))
+    src = _src(21, "bilibili-hotlist",
+               "https://api.bilibili.com/x/web-interface/popular?ps=50")
+    items = BilibiliHotlistCollector(src).fetch()
+    assert len(items) == 2
+    assert items[0].title == "测试视频一号"
+    assert items[0].url == "https://www.bilibili.com/video/BV1FRgn6pEph"
+    assert items[0].content_snapshot == "简介文字"
+    assert items[1].url == "https://www.bilibili.com/video/BV1xx411c7mD"
+    assert all(i.source_id == 21 for i in items)
+
+
+def test_bilibili_hotlist_limit(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get",
+                        lambda url, timeout=15, headers=None: FakeResponse(payload=BILIBILI_SAMPLE))
+    src = _src(21, "bilibili-hotlist", "http://bili.example/api",
+               channel_config='{"limit": 1}')
+    items = BilibiliHotlistCollector(src).fetch()
+    assert len(items) == 1
+    assert items[0].title == "测试视频一号"
+
+
+def test_bilibili_hotlist_custom_headers(monkeypatch):
+    import requests
+    captured = {}
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers")
+        return FakeResponse(payload=BILIBILI_SAMPLE)
+    monkeypatch.setattr(requests, "get", fake_get)
+    src = _src(21, "bilibili-hotlist", "http://bili.example/api",
+               channel_config='{"headers": {"Cookie": "SESSDATA=xyz"}}')
+    items = BilibiliHotlistCollector(src).fetch()
+    assert len(items) == 2
+    assert captured["headers"]["Cookie"] == "SESSDATA=xyz"
+    assert captured["headers"]["Referer"] == "https://www.bilibili.com/"
+
+
+# ---------- hotlist channel_config.headers ----------
+
+def test_hotlist_custom_headers(monkeypatch):
+    import requests
+    captured = {}
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers")
+        return FakeResponse(payload=BAIDU_SAMPLE)
+    monkeypatch.setattr(requests, "get", fake_get)
+    src = _src(7, "hotlist", "http://tophub.example/api",
+               items_path="data.cards[].content[].content", title_field="word",
+               channel_config='{"headers": {"Cookie": "c=1"}}')
+    items = HotlistCollector(src).fetch()
+    assert len(items) == 2
+    assert captured["headers"]["Cookie"] == "c=1"
+    assert "User-Agent" in captured["headers"]

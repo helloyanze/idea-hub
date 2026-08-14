@@ -1,4 +1,6 @@
 from idea_hub.collectors.base import BaseCollector, RawItem
+from idea_hub.collectors.baidu import BaiduHotlistCollector
+from idea_hub.collectors.bilibili import BilibiliHotlistCollector
 from idea_hub.collectors.github import GithubTrendingCollector
 from idea_hub.collectors.hackernews import HackerNewsCollector
 from idea_hub.collectors.hotlist import HotlistCollector
@@ -17,6 +19,8 @@ collector_registry: dict[str, type[BaseCollector]] = {
     ZhihuCollector.type: ZhihuCollector,
     WeiboCollector.type: WeiboCollector,
     V2exCollector.type: V2exCollector,
+    BaiduHotlistCollector.type: BaiduHotlistCollector,
+    BilibiliHotlistCollector.type: BilibiliHotlistCollector,
 }
 
 

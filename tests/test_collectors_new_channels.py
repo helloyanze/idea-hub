@@ -208,3 +208,35 @@ def test_orchestrator_collects_zhihu_source(conn, monkeypatch):
                                                     "如何评价今年暑期的电影市场？"]
     assert result["items"][0].source_id == conn.execute(
         "SELECT id FROM sources WHERE type='zhihu-hotlist'").fetchone()[0]
+
+
+# ---------- channel_config.headers：自定义请求头（cookie，解决 401/403） ----------
+
+def test_zhihu_custom_headers_cookie(monkeypatch):
+    import httpx
+    captured = {}
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers")
+        return FakeHttpxResponse(payload=ZHIHU_SAMPLE)
+    monkeypatch.setattr(httpx, "get", fake_get)
+    src = _src(10, "zhihu-hotlist",
+               "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=50",
+               channel_config='{"headers": {"Cookie": "z_c0=abc"}}')
+    items = ZhihuCollector(src).fetch()
+    assert len(items) == 2
+    assert captured["headers"]["Cookie"] == "z_c0=abc"
+    assert "User-Agent" in captured["headers"]
+
+
+def test_weibo_custom_headers_cookie(monkeypatch):
+    import httpx
+    captured = {}
+    def fake_get(url, **kwargs):
+        captured["headers"] = kwargs.get("headers")
+        return FakeHttpxResponse(payload=WEIBO_SAMPLE)
+    monkeypatch.setattr(httpx, "get", fake_get)
+    src = _src(11, "weibo-hotlist", "https://weibo.com/ajax/side/hotSearch",
+               channel_config='{"headers": {"Cookie": "SUB=xyz"}}')
+    items = WeiboCollector(src).fetch()
+    assert len(items) == 2
+    assert captured["headers"]["Cookie"] == "SUB=xyz"

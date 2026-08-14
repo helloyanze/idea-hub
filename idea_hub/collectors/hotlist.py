@@ -2,6 +2,12 @@ import requests
 
 from idea_hub.collectors.base import BaseCollector, RawItem
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
 
 def _dig(obj, path):
     parts = path.split(".")
@@ -29,7 +35,8 @@ def _dig(obj, path):
                     result, expanded = resolve(item, rest)
                     if result is None:
                         continue
-                    if expanded:
+                    # 两级及更深通配：叶子是列表时也要展平（如 data.cards[].content[].content）
+                    if expanded or isinstance(result, list):
                         results.extend(result)
                     else:
                         results.append(result)
@@ -60,12 +67,16 @@ def _dig(obj, path):
 
 class HotlistCollector(BaseCollector):
     type = "hotlist"
+    default_url = ""
+    default_items_path = "data"
+    default_title_field = "title"
 
     def fetch(self) -> list[RawItem]:
-        url = self.source_row["url"]
-        items_path = self.source_row.get("items_path") or "data"
-        title_field = self.source_row.get("title_field") or "title"
-        resp = requests.get(url, timeout=15)
+        url = self.source_row.get("url") or self.default_url
+        items_path = self.source_row.get("items_path") or self.default_items_path
+        title_field = self.source_row.get("title_field") or self.default_title_field
+        headers = self.build_headers({"User-Agent": USER_AGENT})
+        resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         data = _dig(resp.json(), items_path) or []
         items = []

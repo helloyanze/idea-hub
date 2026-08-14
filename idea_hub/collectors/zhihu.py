@@ -1,9 +1,6 @@
-import json
-
 import httpx
 
 from idea_hub.collectors.base import BaseCollector, CollectorError, RawItem
-
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -16,16 +13,11 @@ class ZhihuCollector(BaseCollector):
     type = "zhihu-hotlist"
 
     def fetch(self) -> list[RawItem]:
-        try:
-            config = json.loads(self.source_row.get("channel_config") or "{}")
-            limit = config.get("limit", 50)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            limit = 50
-
+        limit = self.load_channel_config().get("limit", 50)
         try:
             response = httpx.get(
                 "https://www.zhihu.com/api/v3/feed/topstory/hot-lists/total?limit=50",
-                headers={"User-Agent": USER_AGENT},
+                headers=self.build_headers({"User-Agent": USER_AGENT}),
                 timeout=10,
             )
             response.raise_for_status()
