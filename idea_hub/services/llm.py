@@ -77,6 +77,7 @@ def chat_json(
     timeout: float = 90,
     max_retries: int = 2,
     heartbeat: Callable[[], None] | None = None,
+    token_usage: dict | None = None,
 ) -> dict:
     """调用 DeepSeek 并宽松解析返回的 JSON。"""
     if not api_key:
@@ -100,6 +101,9 @@ def chat_json(
             )
             resp.raise_for_status()
             data = resp.json()
+            if token_usage is not None:
+                usage = data.get("usage") or {}
+                token_usage["total"] = int(usage.get("total_tokens") or 0)
             content = data["choices"][0]["message"]["content"]
             return _parse_llm_json(content)
         except Exception as exc:

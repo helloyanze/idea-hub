@@ -6,9 +6,11 @@ from .. import db, models
 from ..collectors import collect_all
 from ..errors import AppError, BAD_REQUEST
 from ..services.filtering import apply_keywords_filter, dedup_by_url, truncate_snapshot
+from ..services import generate
 from ..services import settings as settings_service
 from ..services.notify import emit
 from ..services.scorer import score_items
+from ..services.tasks import create_from_generation
 
 
 _db_path: str | None = None
@@ -224,6 +226,91 @@ def run_collect_job(job_id, payload, db_path, api_key=None) -> None:
                 conn,
                 "job_failed",
                 "收集任务失败",
+                str(exc),
+                "error",
+                entity_type="job",
+                entity_id=job_id,
+            )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def run_generate_job(job_id, payload, db_path, api_key, base_path=None) -> None:
+    """Execute a generate job synchronously; callers may run it in a worker thread."""
+    if base_path is None:
+        from ..config import load as load_config
+
+        base_path = load_config().base_path
+    conn = None
+    try:
+        conn = db.connect(db_path)
+        mark_running(job_id)
+        heartbeat(job_id)
+        body = payload or {}
+        candidates = generate.get_candidates(
+            conn, count=body.get("count"), hotspot_ids=body.get("hotspot_ids")
+        )
+        total = len(candidates)
+        task_ids = []
+        failed_items = []
+        token_total = 0
+        if candidates:
+            token_usage = {}
+            gens = generate.generate_one(
+                candidates,
+                api_key,
+                heartbeat=lambda: heartbeat(job_id),
+                token_usage=token_usage,
+            )
+            token_total = int(token_usage.get("total") or 0)
+        else:
+            gens = []
+        for index, (candidate, gen) in enumerate(zip(candidates, gens), start=1):
+            try:
+                task_id = create_from_generation(conn, gen, candidate, base_path=base_path)
+                task_ids.append(task_id)
+            except Exception as exc:
+                failed_items.append(
+                    {"hotspot_id": candidate["hotspot_id"], "error": str(exc)}
+                )
+            finally:
+                update_progress(job_id, int(index / total * 100) if total else 100)
+                heartbeat(job_id)
+        if total == 0:
+            update_progress(job_id, 100)
+        result = {"task_ids": task_ids, "task_count": len(task_ids)}
+        if failed_items:
+            result["failed_items"] = failed_items
+        result_ref = json.dumps(result, ensure_ascii=False)
+        if finish(job_id, "done", result_ref=result_ref, token_used=token_total):
+            if failed_items:
+                emit(
+                    conn,
+                    "generate_done",
+                    "构思生成完成（部分失败）",
+                    f"生成 {len(task_ids)} 个构思，失败 {len(failed_items)} 个",
+                    "warn",
+                    entity_type="job",
+                    entity_id=job_id,
+                )
+            else:
+                emit(
+                    conn,
+                    "generate_done",
+                    "构思生成完成",
+                    f"生成 {len(task_ids)} 个构思",
+                    "info",
+                    entity_type="job",
+                    entity_id=job_id,
+                )
+    except Exception as exc:
+        finish(job_id, "failed", error=str(exc))
+        if conn is not None:
+            emit(
+                conn,
+                "job_failed",
+                "生成任务失败",
                 str(exc),
                 "error",
                 entity_type="job",

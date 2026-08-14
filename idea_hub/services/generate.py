@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 
 from .llm import chat_json
 from .settings import get_all
@@ -131,13 +132,22 @@ def generate_one(
     api_key: str,
     timeout: float = 90,
     max_retries: int = 2,
+    heartbeat: Callable[[], None] | None = None,
+    token_usage: dict | None = None,
 ) -> list[dict]:
     """为候选热点生成并规范化内容构思。"""
     if not api_key:
         raise ValueError("DEEPSEEK_API_KEY 未配置：生成任务需要 LLM key，无法降级执行")
 
     messages = build_generate_prompt(candidates)
-    result = chat_json(messages, api_key, timeout=timeout, max_retries=max_retries)
+    result = chat_json(
+        messages,
+        api_key,
+        timeout=timeout,
+        max_retries=max_retries,
+        heartbeat=heartbeat,
+        token_usage=token_usage,
+    )
     if not isinstance(result, list):
         raise ValueError("generate 输出不是 JSON 数组")
     return [_normalize_gen(item) for item in result if isinstance(item, dict)]
