@@ -1,7 +1,8 @@
 """Job lifecycle and collect-job execution services."""
 
 import json
-from concurrent.futures import FutureTimeout, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 
 from .. import db, models
 from ..collectors import collect_all
