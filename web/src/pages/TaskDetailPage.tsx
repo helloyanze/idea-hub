@@ -1,8 +1,11 @@
-import { useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import type { ChangeEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useParams } from "react-router-dom"
 
-import { apiFetch } from "@/api/client"
+import { ApiError, apiFetch } from "@/api/client"
+import { MarkdownEditor } from "@/components/editor/MarkdownEditor"
+import type { OutputVersionMeta } from "@/components/editor/MarkdownEditor"
 import { ScoreBadge } from "@/components/score/ScoreBadge"
 import {
   DEFAULT_DIMENSIONS,
@@ -29,6 +32,16 @@ interface TaskOutput {
   latest_version: number | null
   version_count: number
   ai_summary: string
+}
+
+interface OutputDetail {
+  id: number
+  task_id: number
+  version: number
+  content: string
+  filename: string
+  ai_summary: string
+  created_at: string
 }
 
 interface TaskDetail {
@@ -81,6 +94,107 @@ function TaskDetailPage() {
     queryKey: ["settings"],
     queryFn: () => apiFetch<Settings>("/api/v1/settings"),
   })
+
+  const [editorContent, setEditorContent] = useState("")
+  const [editorBaseVersion, setEditorBaseVersion] = useState(0)
+  const [outputConflict, setOutputConflict] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const outputQuery = useQuery({
+    queryKey: ["task-output", id],
+    queryFn: () => apiFetch<OutputDetail>("/api/v1/tasks/" + id + "/output"),
+    enabled: id !== undefined && taskQuery.data?.output.has_output === true,
+  })
+
+  const versionsQuery = useQuery({
+    queryKey: ["task-output-versions", id],
+    queryFn: () =>
+      apiFetch<{ items: OutputVersionMeta[] }>(
+        "/api/v1/tasks/" + id + "/output/versions",
+      ),
+    enabled: id !== undefined && taskQuery.data?.output.has_output === true,
+  })
+
+  useEffect(() => {
+    const data = outputQuery.data
+    if (data) {
+      setEditorContent(data.content)
+      setEditorBaseVersion(data.version)
+    }
+  }, [outputQuery.data?.version])
+
+  async function viewVersion(version: number) {
+    const data = await apiFetch<OutputDetail>(
+      "/api/v1/tasks/" + id + "/output/versions/" + version,
+    )
+    setEditorContent(data.content)
+    setEditorBaseVersion(data.version)
+  }
+
+  const saveOutputMutation = useMutation({
+    mutationFn: (args: { content: string; baseVersion: number }) =>
+      apiFetch("/api/v1/tasks/" + id + "/output", {
+        method: "PUT",
+        body: JSON.stringify({
+          content: args.content,
+          base_version: args.baseVersion,
+        }),
+      }),
+    onSuccess: () => {
+      setOutputConflict(null)
+      void queryClient.invalidateQueries({ queryKey: ["task-output", id] })
+      void queryClient.invalidateQueries({
+        queryKey: ["task-output-versions", id],
+      })
+    },
+    onError: (error: Error) => {
+      if (error instanceof ApiError && error.code === "VERSION_CONFLICT") {
+        setOutputConflict("内容已被更新，重新加载最新版")
+        void queryClient.invalidateQueries({ queryKey: ["task-output", id] })
+      } else {
+        setOutputConflict(error.message)
+      }
+    },
+  })
+
+  const uploadMutation = useMutation({
+    mutationFn: (args: { filename: string; content: string }) =>
+      apiFetch("/api/v1/tasks/" + id + "/output/upload", {
+        method: "POST",
+        body: JSON.stringify({
+          filename: args.filename,
+          content: args.content,
+        }),
+      }),
+    onSuccess: () => {
+      setOutputConflict(null)
+      void queryClient.invalidateQueries({ queryKey: ["task-output", id] })
+      void queryClient.invalidateQueries({
+        queryKey: ["task-output-versions", id],
+      })
+    },
+    onError: (error: Error) => setOutputConflict(error.message),
+  })
+
+  async function handleUploadFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    const content = await file.text()
+    uploadMutation.mutate({ filename: file.name, content })
+    event.target.value = ""
+  }
+
+  const downloadUrl = useMemo(() => {
+    if (!outputQuery.data) return null
+    const blob = new Blob([outputQuery.data.content], { type: "text/markdown" })
+    return URL.createObjectURL(blob)
+  }, [outputQuery.data])
+
+  useEffect(() => {
+    return () => {
+      if (downloadUrl) URL.revokeObjectURL(downloadUrl)
+    }
+  }, [downloadUrl])
 
   function invalidateTaskData() {
     void queryClient.invalidateQueries({ queryKey: ["task", id] })
@@ -288,16 +402,74 @@ function TaskDetailPage() {
       </section>
 
       <section className="space-y-3 rounded-xl border p-4">
-        <h3 className="font-semibold">产出</h3>
+        <h3 className="font-semibold">产物</h3>
         {task.output.has_output ? (
-          <div className="space-y-1">
-            <p>有产出</p>
-            <p>最新版本 {task.output.latest_version}</p>
-            <p>版本数量 {task.output.version_count}</p>
-            {task.output.ai_summary ? <p>{task.output.ai_summary}</p> : null}
+          <div className="space-y-4">
+            {outputConflict ? (
+              <p data-testid="output-conflict" className="text-destructive">
+                {outputConflict}
+              </p>
+            ) : null}
+            {outputQuery.isPending ? (
+              <p>加载中...</p>
+            ) : outputQuery.data ? (
+              <>
+                <MarkdownEditor
+                  content={editorContent}
+                  baseVersion={editorBaseVersion}
+                  filename={outputQuery.data.filename}
+                  versions={versionsQuery.data?.items ?? []}
+                  onSave={(content, baseVersion) =>
+                    saveOutputMutation.mutate({ content, baseVersion })
+                  }
+                  onViewVersion={(version) => void viewVersion(version)}
+                  saving={saveOutputMutation.isPending}
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <a
+                    href={downloadUrl ?? "#"}
+                    download={outputQuery.data.filename}
+                    className="text-sm text-primary hover:underline"
+                  >
+                    下载
+                  </a>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    上传替换
+                  </Button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".md,.markdown,text/markdown"
+                    aria-label="上传文件"
+                    className="hidden"
+                    onChange={handleUploadFile}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <h4 className="text-sm font-semibold">版本历史</h4>
+                  <ul className="space-y-1 text-sm">
+                    {versionsQuery.data?.items.map((version) => (
+                      <li key={version.version}>
+                        v{version.version} {version.created_at} {version.filename}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </>
+            ) : null}
           </div>
         ) : (
-          <p>暂无产出</p>
+          <div className="space-y-1">
+            <p>未生成</p>
+            <p className="text-sm text-muted-foreground">
+              执行任务后自动生成产物，也可以直接上传文件创建产物
+            </p>
+          </div>
         )}
       </section>
 
