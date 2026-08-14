@@ -69,6 +69,20 @@ interface Settings {
   score_dimensions?: string[]
 }
 
+type InfoFormState = {
+  title: string
+  target_desc: string
+  content_type: string
+  expire_at: string
+}
+
+/** Convert stored expire_at ("2026-09-01" / "2026-09-01 10:00:00") to a
+ *  datetime-local input value ("2026-09-01T00:00" / "2026-09-01T10:00"). */
+function toDatetimeLocal(value: string): string {
+  const v = value.slice(0, 16).replace(" ", "T")
+  return v.includes("T") ? v : `${v}T00:00`
+}
+
 const STATUS_LABELS: Record<string, string> = {
   todo: "待办",
   waiting: "等待中",
@@ -83,6 +97,14 @@ function TaskDetailPage() {
   const [isEditingTags, setIsEditingTags] = useState(false)
   const [tagInput, setTagInput] = useState("")
   const [actionError, setActionError] = useState<string | null>(null)
+  const [isEditingInfo, setIsEditingInfo] = useState(false)
+  const [infoForm, setInfoForm] = useState<InfoFormState>({
+    title: "",
+    target_desc: "",
+    content_type: "article",
+    expire_at: "",
+  })
+  const [infoError, setInfoError] = useState<string | null>(null)
 
   const taskQuery = useQuery({
     queryKey: ["task", id],
@@ -174,6 +196,20 @@ function TaskDetailPage() {
       })
     },
     onError: (error: Error) => setOutputConflict(error.message),
+  })
+
+  const infoMutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) =>
+      apiFetch(`/api/v1/tasks/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      setInfoError(null)
+      void queryClient.invalidateQueries({ queryKey: ["task", id] })
+      setIsEditingInfo(false)
+    },
+    onError: (error: Error) => setInfoError(error.message),
   })
 
   async function handleUploadFile(event: ChangeEvent<HTMLInputElement>) {
@@ -286,6 +322,50 @@ function TaskDetailPage() {
     ["重做备注", task.redo_note],
   ].filter(([, value]) => value !== null && value !== undefined && value !== "")
 
+  function startEditingInfo() {
+    setInfoForm({
+      title: task.title,
+      target_desc: task.target_desc,
+      content_type: task.content_type,
+      expire_at: task.expire_at ? toDatetimeLocal(task.expire_at) : "",
+    })
+    setInfoError(null)
+    setIsEditingInfo(true)
+  }
+
+  function cancelEditInfo() {
+    setIsEditingInfo(false)
+    setInfoError(null)
+  }
+
+  function saveInfo() {
+    if (!infoForm.title.trim()) {
+      setInfoError("标题不能为空")
+      return
+    }
+
+    const payload: Record<string, unknown> = {}
+    if (infoForm.title !== task.title) payload.title = infoForm.title
+    if (infoForm.target_desc !== task.target_desc) {
+      payload.target_desc = infoForm.target_desc
+    }
+    if (infoForm.content_type !== task.content_type) {
+      payload.content_type = infoForm.content_type
+    }
+
+    const originalExpire = task.expire_at ? toDatetimeLocal(task.expire_at) : ""
+    if (infoForm.expire_at !== originalExpire) {
+      payload.expire_at = infoForm.expire_at === "" ? null : infoForm.expire_at.replace("T", " ")
+    }
+
+    if (Object.keys(payload).length === 0) {
+      setIsEditingInfo(false)
+      return
+    }
+
+    infoMutation.mutate(payload)
+  }
+
   function startEditingTags() {
     setTagInput(task.tags.map((tag) => tag.name).join(", "))
     setIsEditingTags(true)
@@ -326,15 +406,109 @@ function TaskDetailPage() {
       </section>
 
       <section className="space-y-3 rounded-xl border p-4">
-        <h3 className="font-semibold">任务信息</h3>
-        <dl className="grid gap-3 sm:grid-cols-2">
-          {infoItems.map(([label, value]) => (
-            <div key={String(label)} className="space-y-1">
-              <dt className="text-sm text-muted-foreground">{label}</dt>
-              <dd>{String(value)}</dd>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="font-semibold">任务信息</h3>
+          {!isEditingInfo ? (
+            <Button type="button" variant="outline" size="sm" onClick={startEditingInfo}>
+              编辑
+            </Button>
+          ) : null}
+        </div>
+        {!isEditingInfo ? (
+          <dl className="grid gap-3 sm:grid-cols-2">
+            {infoItems.map(([label, value]) => (
+              <div key={String(label)} className="space-y-1">
+                <dt className="text-sm text-muted-foreground">{label}</dt>
+                <dd>{String(value)}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="flex flex-col gap-3">
+                <Label htmlFor="task-info-title">标题</Label>
+                <Input
+                  id="task-info-title"
+                  aria-label="标题"
+                  value={infoForm.title}
+                  onChange={(event) =>
+                    setInfoForm((current) => ({
+                      ...current,
+                      title: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex flex-col gap-3">
+                <Label htmlFor="task-info-target-desc">目标描述</Label>
+                <Input
+                  id="task-info-target-desc"
+                  aria-label="目标描述"
+                  value={infoForm.target_desc}
+                  onChange={(event) =>
+                    setInfoForm((current) => ({
+                      ...current,
+                      target_desc: event.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex flex-col gap-3">
+                <Label htmlFor="task-info-content-type">内容类型</Label>
+                <select
+                  id="task-info-content-type"
+                  aria-label="内容类型"
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3"
+                  value={infoForm.content_type}
+                  onChange={(event) =>
+                    setInfoForm((current) => ({
+                      ...current,
+                      content_type: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="article">article</option>
+                  <option value="video_script">video_script</option>
+                  <option value="tweet">tweet</option>
+                  <option value="newsletter">newsletter</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-3">
+                <Label htmlFor="task-info-expire-at">过期时间</Label>
+                <Input
+                  type="datetime-local"
+                  id="task-info-expire-at"
+                  aria-label="过期时间"
+                  value={infoForm.expire_at}
+                  onChange={(event) =>
+                    setInfoForm((current) => ({
+                      ...current,
+                      expire_at: event.target.value,
+                    }))
+                  }
+                />
+              </div>
             </div>
-          ))}
-        </dl>
+            {infoError ? (
+              <p data-testid="task-info-error" className="text-destructive">
+                {infoError}
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                onClick={saveInfo}
+                disabled={infoMutation.isPending}
+              >
+                保存
+              </Button>
+              <Button type="button" variant="outline" onClick={cancelEditInfo}>
+                取消
+              </Button>
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="space-y-3 rounded-xl border p-4">
