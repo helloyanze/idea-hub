@@ -1,5 +1,9 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import {
   BrowserRouter,
   Navigate,
@@ -20,9 +24,10 @@ import {
 import { ThemeProvider } from "@/lib/theme";
 import { HotspotsPage } from "@/pages/HotspotsPage";
 import { KanbanPage } from "@/pages/KanbanPage";
+import { NotificationsPage } from "@/pages/NotificationsPage";
 import { SourcesPage } from "@/pages/SourcesPage";
+import { StatsPage } from "@/pages/StatsPage";
 import { TaskDetailPage } from "@/pages/TaskDetailPage";
-import { UnderConstruction } from "@/pages/UnderConstruction";
 
 const queryClient = new QueryClient();
 
@@ -50,10 +55,19 @@ function AuthGate() {
 function Shell() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
+  const unreadCountQuery = useQuery({
+    queryKey: ["notifications", "unread-count"],
+    queryFn: () =>
+      apiFetch<{ count: number }>("/api/v1/notifications/unread-count"),
+    refetchInterval: 30000,
+    retry: false,
+  });
 
   useEffect(() => {
     void apiFetch("/api/v1/health").catch(() => {});
   }, []);
+
+  const unreadCount = unreadCountQuery.data?.count;
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
@@ -96,7 +110,19 @@ function Shell() {
                 ].join(" ")
               }
             >
-              {item.label}
+              <>
+                {item.label}
+                {item.to === "/notifications" &&
+                typeof unreadCount === "number" &&
+                unreadCount > 0 ? (
+                  <span
+                    data-testid="nav-unread-badge"
+                    className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-red-100 px-1.5 text-xs font-semibold text-red-800"
+                  >
+                    {unreadCount}
+                  </span>
+                ) : null}
+              </>
             </NavLink>
           ))}
         </nav>
@@ -105,18 +131,9 @@ function Shell() {
             <Route path="/" element={<Navigate replace to="/kanban" />} />
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/hotspots" element={<HotspotsPage />} />
-            <Route
-              path="/sources"
-              element={<SourcesPage />}
-            />
-            <Route
-              path="/notifications"
-              element={<UnderConstruction description="通知页面将在后续任务中实现" />}
-            />
-            <Route
-              path="/stats"
-              element={<UnderConstruction description="统计页面将在后续任务中实现" />}
-            />
+            <Route path="/sources" element={<SourcesPage />} />
+            <Route path="/notifications" element={<NotificationsPage />} />
+            <Route path="/stats" element={<StatsPage />} />
             <Route path="/tasks/:id" element={<TaskDetailPage />} />
           </Routes>
         </main>

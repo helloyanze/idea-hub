@@ -16,6 +16,7 @@ const okHealth = () => jsonResponse({ data: { status: "ok" } });
 beforeEach(() => {
   localStorage.clear();
   document.documentElement.className = "";
+  window.history.pushState({}, "", "/");
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -71,6 +72,58 @@ describe("App auth flow", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     await user.click(screen.getByRole("button", { name: /切换主题/ }));
     expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
+
+  it("shows an unread badge on the notifications nav link", async () => {
+    setCredentials("alice", "s3cret");
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const u = String(input);
+      if (u.includes("/api/v1/notifications/unread-count")) {
+        return Promise.resolve(jsonResponse({ data: { count: 3 } }));
+      }
+      if (u.includes("/api/v1/tasks")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: { items: [], total: 0, page: 1, size: 20 },
+          }),
+        );
+      }
+      return Promise.resolve(okHealth());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    const badge = await screen.findByTestId("nav-unread-badge");
+    expect(badge).toHaveTextContent("3");
+  });
+
+  it("renders the notifications page at /notifications", async () => {
+    setCredentials("alice", "s3cret");
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const u = String(input);
+      if (u.includes("/api/v1/notifications/unread-count")) {
+        return Promise.resolve(jsonResponse({ data: { count: 1 } }));
+      }
+      if (u.includes("/api/v1/notifications?")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: { items: [], total: 0, page: 1, size: 20 },
+          }),
+        );
+      }
+      return Promise.resolve(okHealth());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("link", { name: /看板/ });
+
+    await user.click(screen.getByRole("link", { name: /通知/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: /通知中心/ }),
+    ).toBeInTheDocument();
   });
 
   it("navigates to the kanban board with q when searching from the header", async () => {
