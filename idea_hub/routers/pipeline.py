@@ -60,6 +60,12 @@ async def generate(request: Request, body: GenerateIn | None = None):
             code=BAD_REQUEST,
             message="DEEPSEEK_API_KEY 未配置：生成任务需要 LLM key，无法降级执行",
         )
+    if body is not None and body.count is not None and body.count < 1:
+        raise AppError(
+            status_code=400,
+            code=BAD_REQUEST,
+            message="count 必须大于等于 1",
+        )
     payload = {
         "count": body.count if body else None,
         "hotspot_ids": body.hotspot_ids if body else None,

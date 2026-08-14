@@ -253,7 +253,7 @@ def test_run_generate_job_progress_and_heartbeat(conn, tmp_path, monkeypatch):
     jobs.run_generate_job(job_id, {}, str(tmp_path / "test.db"), "sk-test",
                           base_path=str(tmp_path))
 
-    assert progress_calls == [50, 100]  # 每候选后 update_progress
+    assert progress_calls == [50, 100, 100]  # 每候选后更新，完成后强制 100
     assert len(heartbeats) >= 2  # 每候选后 heartbeat（LLM 尝试前心跳由 chat_json 注入）
 
 
@@ -291,9 +291,14 @@ def test_run_generate_job_no_candidates(conn, tmp_path, monkeypatch):
                           base_path=str(tmp_path))
 
     assert called == []  # 无候选不调 LLM
-    job = conn.execute("SELECT status, result_ref FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    job = conn.execute(
+        "SELECT status, progress, result_ref FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
     assert job["status"] == "done"
-    assert json.loads(job["result_ref"]) == {"task_ids": [], "task_count": 0}
+    assert job["progress"] == 100
+    assert json.loads(job["result_ref"]) == {
+        "task_ids": [], "task_count": 0, "dropped": 0
+    }
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
     notif = conn.execute(
         "SELECT type FROM notifications WHERE type = 'generate_done'"
@@ -311,11 +316,40 @@ def test_run_generate_job_fewer_gens_than_candidates(conn, tmp_path, monkeypatch
     jobs.run_generate_job(job_id, {}, str(tmp_path / "test.db"), "sk-test",
                           base_path=str(tmp_path))
 
-    job = conn.execute("SELECT status, result_ref FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    job = conn.execute(
+        "SELECT status, progress, result_ref FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
     assert job["status"] == "done"
+    assert job["progress"] == 100
     result = json.loads(job["result_ref"])
     assert result["task_count"] == 1
+    assert result["dropped"] == 1
     assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_run_generate_job_zero_gens_with_candidates(conn, tmp_path, monkeypatch):
+    seed_hotspot(conn, title="热点A")
+    seed_hotspot(conn, title="热点B")
+    job_id = jobs.create_job(conn, "generate", {})
+    jobs.mark_running(job_id)
+    monkeypatch.setattr(generate, "generate_one", _make_generate_one([]))
+
+    jobs.run_generate_job(job_id, {}, str(tmp_path / "test.db"), "sk-test",
+                          base_path=str(tmp_path))
+
+    job = conn.execute(
+        "SELECT status, progress, result_ref FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert job["status"] == "done"
+    assert job["progress"] == 100
+    result = json.loads(job["result_ref"])
+    assert result["task_count"] == 0
+    assert result["dropped"] == 2
+    notif = conn.execute(
+        "SELECT level FROM notifications WHERE type = 'generate_done'"
+    ).fetchone()
+    assert notif is not None
+    assert notif["level"] == "warn"
 
 
 # ---- generate_one token_usage 透传 ----
@@ -374,6 +408,40 @@ def test_generate_endpoint_no_api_key_400(tmp_path):
     conn = db.connect(config.db_path)
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'generate'").fetchone()[0] == 0
     conn.close()
+
+
+def test_generate_endpoint_rejects_zero_count_without_creating_job(tmp_path):
+    config = make_config(tmp_path, deepseek_api_key="sk-test")
+    client = client_for(config)
+
+    resp = client.post("/api/v1/generate", auth=AUTH, json={"count": 0})
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "BAD_REQUEST"
+    conn = db.connect(config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE type = 'generate'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_generate_endpoint_rejects_negative_count_without_creating_job(tmp_path):
+    config = make_config(tmp_path, deepseek_api_key="sk-test")
+    client = client_for(config)
+
+    resp = client.post("/api/v1/generate", auth=AUTH, json={"count": -1})
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "BAD_REQUEST"
+    conn = db.connect(config.db_path)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE type = 'generate'"
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_generate_endpoint_creates_job(tmp_path, monkeypatch):

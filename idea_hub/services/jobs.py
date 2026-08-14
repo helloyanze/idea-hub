@@ -266,6 +266,7 @@ def run_generate_job(job_id, payload, db_path, api_key, base_path=None) -> None:
             token_total = int(token_usage.get("total") or 0)
         else:
             gens = []
+        dropped = max(0, total - len(gens))
         for index, (candidate, gen) in enumerate(zip(candidates, gens), start=1):
             try:
                 task_id = create_from_generation(conn, gen, candidate, base_path=base_path)
@@ -277,19 +278,27 @@ def run_generate_job(job_id, payload, db_path, api_key, base_path=None) -> None:
             finally:
                 update_progress(job_id, int(index / total * 100) if total else 100)
                 heartbeat(job_id)
-        if total == 0:
-            update_progress(job_id, 100)
-        result = {"task_ids": task_ids, "task_count": len(task_ids)}
+        update_progress(job_id, 100)
+        result = {
+            "task_ids": task_ids,
+            "task_count": len(task_ids),
+            "dropped": dropped,
+        }
         if failed_items:
             result["failed_items"] = failed_items
         result_ref = json.dumps(result, ensure_ascii=False)
         if finish(job_id, "done", result_ref=result_ref, token_used=token_total):
-            if failed_items:
+            if failed_items or dropped:
+                notification_body = f"生成 {len(task_ids)} 个构思"
+                if failed_items:
+                    notification_body += f"，失败 {len(failed_items)} 个"
+                if dropped:
+                    notification_body += f"，缺 {dropped} 个"
                 emit(
                     conn,
                     "generate_done",
                     "构思生成完成（部分失败）",
-                    f"生成 {len(task_ids)} 个构思，失败 {len(failed_items)} 个",
+                    notification_body,
                     "warn",
                     entity_type="job",
                     entity_id=job_id,

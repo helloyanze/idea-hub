@@ -26,6 +26,8 @@ def get_candidates(
     hotspot_ids: list[int] | None = None,
 ) -> list[dict]:
     """返回满足生成条件且尚未关联任务的热点。"""
+    if count is not None and count < 1:
+        raise ValueError("count must be >= 1")
     if hotspot_ids is not None and not hotspot_ids:
         return []
 

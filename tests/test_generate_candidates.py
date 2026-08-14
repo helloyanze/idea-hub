@@ -196,6 +196,13 @@ def test_count_truncates(conn):
     assert _ids(items) == hids[:2]
 
 
+def test_non_positive_count_rejected(conn):
+    with pytest.raises(ValueError, match="count must be >= 1"):
+        generate.get_candidates(conn, count=0)
+    with pytest.raises(ValueError, match="count must be >= 1"):
+        generate.get_candidates(conn, count=-1)
+
+
 def test_default_count_from_settings(conn):
     """count 未传时用 settings.generate_count（默认 10）。"""
     source_id = _add_source(conn)
