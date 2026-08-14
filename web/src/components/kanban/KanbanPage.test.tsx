@@ -151,7 +151,7 @@ function listRoute(allTasks: Task[]): [RegExp, (url: string) => Response] {
   ];
 }
 
-function renderPage() {
+function renderPage(initialEntries: string[] = ["/kanban"]) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -160,7 +160,7 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <KanbanPage />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -358,7 +358,6 @@ describe("KanbanPage", () => {
     ]);
 
     renderPage();
-
     expect(await screen.findByText("待办")).toBeInTheDocument();
     await waitFor(() => {
       const doneCall = fetchMock.mock.calls.find(([u]) =>
@@ -366,6 +365,35 @@ describe("KanbanPage", () => {
       );
       expect(doneCall).toBeTruthy();
       expect(String(doneCall![0])).toContain("size=50");
+    });
+  });
+
+  it("passes the q search param to task queries and shows a search chip", async () => {
+    const taskUrls: string[] = [];
+    stubFetch([
+      settingsRoute,
+      [
+        /\/api\/v1\/tasks\?/,
+        (url) => {
+          taskUrls.push(url);
+          return jsonResponse({
+            data: { items: [], total: 0, page: 1, size: 20 },
+          });
+        },
+      ],
+    ]);
+
+    renderPage(["/kanban?q=gpt"]);
+
+    await waitFor(() => {
+      expect(taskUrls.some((u) => u.includes("q=gpt"))).toBe(true);
+    });
+    expect(await screen.findByText("搜索：gpt")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /清除/ }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("搜索：gpt")).not.toBeInTheDocument();
     });
   });
 });

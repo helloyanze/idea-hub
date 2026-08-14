@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   BrowserRouter,
@@ -6,16 +6,19 @@ import {
   NavLink,
   Routes,
   Route,
+  useNavigate,
 } from "react-router-dom";
 
 import { apiFetch } from "@/api/client";
 import { LoginForm } from "@/components/LoginForm";
+import { SearchBox } from "@/components/SearchBox";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   getCredentials,
   subscribeCredentials,
 } from "@/lib/auth";
 import { ThemeProvider } from "@/lib/theme";
+import { HotspotsPage } from "@/pages/HotspotsPage";
 import { KanbanPage } from "@/pages/KanbanPage";
 import { SourcesPage } from "@/pages/SourcesPage";
 import { TaskDetailPage } from "@/pages/TaskDetailPage";
@@ -45,15 +48,35 @@ function AuthGate() {
 }
 
 function Shell() {
+  const navigate = useNavigate();
+  const [search, setSearch] = useState("");
+
   useEffect(() => {
     void apiFetch("/api/v1/health").catch(() => {});
   }, []);
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
+      <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b px-4">
         <h1 className="text-lg font-semibold">Idea Hub</h1>
-        <ThemeToggle />
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="w-48 sm:w-64">
+            <SearchBox
+              label="全局搜索"
+              placeholder="搜索任务..."
+              value={search}
+              onChange={setSearch}
+              onSearch={(value) =>
+                navigate(
+                  value.trim()
+                    ? `/kanban?q=${encodeURIComponent(value.trim())}`
+                    : "/kanban",
+                )
+              }
+            />
+          </div>
+          <ThemeToggle />
+        </div>
       </header>
       <div className="flex min-h-0 flex-1">
         <nav
@@ -81,10 +104,7 @@ function Shell() {
           <Routes>
             <Route path="/" element={<Navigate replace to="/kanban" />} />
             <Route path="/kanban" element={<KanbanPage />} />
-            <Route
-              path="/hotspots"
-              element={<UnderConstruction description="热点页面将在后续任务中实现" />}
-            />
+            <Route path="/hotspots" element={<HotspotsPage />} />
             <Route
               path="/sources"
               element={<SourcesPage />}

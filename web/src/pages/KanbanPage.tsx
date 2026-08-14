@@ -7,6 +7,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query"
+import { useNavigate, useSearchParams } from "react-router-dom"
 
 import { apiFetch } from "@/api/client"
 import { KanbanColumn } from "@/components/kanban/KanbanColumn"
@@ -46,12 +47,19 @@ function canDrop(fromStatus: string, toStatus: string): boolean {
   return !(fromStatus === "done" && toStatus === "in_progress")
 }
 
-function useKanbanQuery(status: string, size: number, enabled: boolean) {
+function useKanbanQuery(
+  status: string,
+  size: number,
+  q: string | undefined,
+  enabled: boolean,
+) {
   return useInfiniteQuery({
-    queryKey: ["kanban", status, size],
+    queryKey: ["kanban", status, size, q],
     queryFn: ({ pageParam }) =>
       apiFetch<TaskPage>(
-        `/api/v1/tasks?status=${status}&page=${pageParam}&size=${size}`,
+        `/api/v1/tasks?status=${status}&page=${pageParam}&size=${size}${
+          q ? `&q=${encodeURIComponent(q)}` : ""
+        }`,
       ),
     initialPageParam: 1,
     getNextPageParam: (lastPage) =>
@@ -64,6 +72,9 @@ function useKanbanQuery(status: string, size: number, enabled: boolean) {
 
 function KanbanPage() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const q = searchParams.get("q") ?? undefined
   const [moveError, setMoveError] = useState<string | null>(null)
 
   const settingsQuery = useQuery({
@@ -74,10 +85,10 @@ function KanbanPage() {
   const doneLimit = settingsQuery.data?.done_column_limit ?? 50
   const queriesEnabled = !settingsQuery.isPending
 
-  const todoQuery = useKanbanQuery("todo", 20, queriesEnabled)
-  const waitingQuery = useKanbanQuery("waiting", 20, queriesEnabled)
-  const inProgressQuery = useKanbanQuery("in_progress", 20, queriesEnabled)
-  const doneQuery = useKanbanQuery("done", doneLimit, queriesEnabled)
+  const todoQuery = useKanbanQuery("todo", 20, q, queriesEnabled)
+  const waitingQuery = useKanbanQuery("waiting", 20, q, queriesEnabled)
+  const inProgressQuery = useKanbanQuery("in_progress", 20, q, queriesEnabled)
+  const doneQuery = useKanbanQuery("done", doneLimit, q, queriesEnabled)
 
   const todoItems = todoQuery.data?.pages.flatMap((page) => page.items) ?? []
   const waitingItems =
@@ -140,8 +151,20 @@ function KanbanPage() {
 
   return (
     <div className="space-y-4 p-4 md:p-6">
-      <div>
+      <div className="space-y-2">
         <h2 className="text-xl font-semibold">任务看板</h2>
+        {q ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span>搜索：{q}</span>
+            <button
+              type="button"
+              onClick={() => navigate("/kanban")}
+              className="rounded-md border px-2 py-1 text-xs hover:bg-accent"
+            >
+              清除
+            </button>
+          </div>
+        ) : null}
         {moveError ? (
           <p data-testid="kanban-move-error" className="text-destructive">
             {moveError}

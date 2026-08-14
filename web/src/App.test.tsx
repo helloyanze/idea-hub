@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { CREDENTIALS_KEY, setCredentials } from "@/lib/auth";
@@ -71,5 +71,45 @@ describe("App auth flow", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     await user.click(screen.getByRole("button", { name: /切换主题/ }));
     expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
+
+  it("navigates to the kanban board with q when searching from the header", async () => {
+    setCredentials("alice", "s3cret");
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const u = String(input);
+      if (u.includes("/api/v1/tasks")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: { items: [], total: 0, page: 1, size: 20 },
+          }),
+        );
+      }
+      if (u.includes("/api/v1/settings")) {
+        return Promise.resolve(
+          jsonResponse({ data: { done_column_limit: 50 } }),
+        );
+      }
+      return Promise.resolve(okHealth());
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole("link", { name: /看板/ });
+
+    await user.type(
+      screen.getByRole("searchbox", { name: /全局搜索/ }),
+      "gpt",
+    );
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe("/kanban");
+      expect(window.location.search).toBe("?q=gpt");
+    });
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([u]) => String(u).includes("q=gpt")),
+      ).toBe(true);
+    });
   });
 });
