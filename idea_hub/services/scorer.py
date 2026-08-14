@@ -2,12 +2,16 @@
 
 from dataclasses import dataclass, field
 import json
+import logging
 import math
 import re
 
 import httpx
 
 from ..collectors.base import RawItem
+
+
+logger = logging.getLogger(__name__)
 
 
 LLM_URL = "https://api.deepseek.com/chat/completions"
@@ -194,6 +198,7 @@ def score_items(items, api_key=None, dimensions=None, threshold=8):
                 last_err = exc
         else:
             # 重试耗尽：降级为全量 admit，收集不中断
+            logger.warning("LLM scoring failed, falling back to admit: %s", last_err)
             return _fallback(items)
         for pos, i in enumerate(idx_map):
             it = items[i]

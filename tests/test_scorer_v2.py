@@ -75,14 +75,21 @@ def test_verdict_by_threshold(monkeypatch):
     assert out[1].verdict == "discard"  # 7 < 8
 
 
-def test_round_mean_equality(monkeypatch):
-    rows = [{"title": "T0", "dimension_scores": {"facts": 8, "verification": 7,
-                                                 "timeliness": 9, "value": 8}}]
+def test_round_mean_half_up(monkeypatch):
+    rows = [
+        {"title": "T0", "dimension_scores": {"facts": 9, "verification": 8,
+                                             "timeliness": 7, "value": 10}},
+        {"title": "T1", "dimension_scores": {"facts": 8, "verification": 8,
+                                             "timeliness": 8, "value": 7}},
+    ]
     monkeypatch.setattr(scorer.httpx, "post", _fake_llm(rows))
-    out = score_items(_items(1), api_key="sk-test", dimensions=DIMS)
-    # (8+7+9+8)/4 = 8.0 → 四舍五入 8
-    assert out[0].final_score == 8
+    out = score_items(_items(2), api_key="sk-test", dimensions=DIMS)
+    # (9+8+7+10)/4 = 8.5 → 四舍五入 9
+    assert out[0].final_score == 9
     assert out[0].verdict == "admit"
+    # (8+8+8+7)/4 = 7.75 → 四舍五入 8
+    assert out[1].final_score == 8
+    assert out[1].verdict == "admit"
 
 
 def test_llm_error_falls_back_admit(monkeypatch):
