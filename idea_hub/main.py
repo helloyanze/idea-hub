@@ -18,6 +18,7 @@ from .routers.settings import router as settings_router
 from .routers.sources import router as sources_router
 from .routers.pipeline import router as pipeline_router
 from .routers.jobs import router as jobs_router
+from .routers.hotspots import router as hotspots_router
 
 
 _basic = HTTPBasic(auto_error=False)
@@ -139,6 +140,7 @@ def create_app(config: Config) -> FastAPI:
     app.include_router(sources_router, dependencies=[Depends(require_auth)])
     app.include_router(pipeline_router, dependencies=[Depends(require_auth)])
     app.include_router(jobs_router, dependencies=[Depends(require_auth)])
+    app.include_router(hotspots_router, dependencies=[Depends(require_auth)])
     app.add_middleware(
         CORSMiddleware,
         allow_origins=getattr(config, "cors_origins", ["http://localhost:5173"]),
