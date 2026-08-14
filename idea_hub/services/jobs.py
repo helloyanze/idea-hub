@@ -1,6 +1,7 @@
 """Job lifecycle and collect-job execution services."""
 
 import json
+from concurrent.futures import FutureTimeout, ThreadPoolExecutor
 
 from .. import db, models
 from ..collectors import collect_all
@@ -153,7 +154,19 @@ def run_collect_job(job_id, payload, db_path, api_key=None) -> None:
         errors = []
         for index, row in enumerate(rows, start=1):
             try:
-                result = collect_all(conn, source_ids=[row["id"]])
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        collect_all, conn, source_ids=[row["id"]]
+                    )
+                    try:
+                        result = future.result(timeout=35)
+                    except FutureTimeout:
+                        future.cancel()
+                        errors.append({
+                            "source_id": row["id"],
+                            "error": "collect timed out after 35s",
+                        })
+                        continue
                 errors.extend(result["errors"])
                 items = apply_keywords_filter(result["items"], row["keywords"])
                 items = dedup_by_url(conn, items)
