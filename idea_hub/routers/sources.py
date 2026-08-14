@@ -15,8 +15,8 @@ class SourceIn(BaseModel):
     name: str
     url: str
     enabled: bool = True
-    items_path: str = "data"
-    title_field: str = "title"
+    items_path: str | None = None
+    title_field: str | None = None
     keywords: str = ""
     ttl_hours: int | None = 24
     channel_config: dict = {}

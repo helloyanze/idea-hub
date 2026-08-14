@@ -48,13 +48,20 @@ def create_source(conn, payload: dict) -> dict:
             "UNKNOWN_SOURCE_TYPE",
             f"Unknown source type: {source_type}",
         )
+    collector_cls = collector_registry[source_type]
+    items_path = payload.get("items_path") or getattr(
+        collector_cls, "default_items_path", "data"
+    )
+    title_field = payload.get("title_field") or getattr(
+        collector_cls, "default_title_field", "title"
+    )
     values = (
         source_type,
         payload["name"],
         payload["url"],
         1 if payload["enabled"] else 0,
-        payload["items_path"],
-        payload["title_field"],
+        items_path,
+        title_field,
         payload["keywords"],
         payload["ttl_hours"],
         json.dumps(payload["channel_config"]),
